@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BOT_NAME="lifeos-bot"
+SERVICE="$BOT_NAME.service"
+
+case "${1:-help}" in
+    start)
+        echo "Starting $BOT_NAME..."
+        sudo systemctl start "$SERVICE"
+        sleep 2
+        sudo systemctl status "$SERVICE" --no-pager -l
+        ;;
+    stop)
+        echo "Stopping $BOT_NAME..."
+        sudo systemctl stop "$SERVICE"
+        echo "Stopped."
+        ;;
+    restart)
+        echo "Restarting $BOT_NAME..."
+        sudo systemctl restart "$SERVICE"
+        sleep 2
+        sudo systemctl status "$SERVICE" --no-pager -l
+        ;;
+    status)
+        sudo systemctl status "$SERVICE" --no-pager -l
+        ;;
+    logs)
+        shift
+        if [ "${1:-}" = "-f" ]; then
+            tail -f /var/log/$BOT_NAME/bot.log
+        else
+            tail -n "${1:-50}" /var/log/$BOT_NAME/bot.log
+        fi
+        ;;
+    errors)
+        grep -i "error\|exception\|traceback" /var/log/$BOT_NAME/bot.log | tail -n "${1:-20}"
+        ;;
+    enable)
+        sudo systemctl enable "$SERVICE"
+        echo "Enabled on boot."
+        ;;
+    disable)
+        sudo systemctl disable "$SERVICE"
+        echo "Disabled on boot."
+        ;;
+    debug)
+        echo "Running in foreground (Ctrl+C to stop)..."
+        cd "$(dirname "$0")"
+        .venv/bin/python run.py
+        ;;
+    health)
+        echo "=== Service Status ==="
+        sudo systemctl is-active "$SERVICE" && echo "ACTIVE" || echo "INACTIVE"
+        echo ""
+        echo "=== Last 5 Log Lines ==="
+        tail -5 /var/log/$BOT_NAME/bot.log 2>/dev/null || echo "No logs yet"
+        echo ""
+        echo "=== Disk Usage ==="
+        du -sh /var/log/$BOT_NAME/ 2>/dev/null || echo "No log dir"
+        du -sh ~/.cache/lifeos_bot/ 2>/dev/null || echo "No cache dir"
+        echo ""
+        echo "=== Process ==="
+        pgrep -af "run.py" || echo "No process running"
+        ;;
+    help|*)
+        cat << EOF
+LifeOS Bot Management
+
+Usage: ./lifeos <command>
+
+Commands:
+    start       Start the bot service
+    stop        Stop the bot service
+    restart     Restart the bot service
+    status      Show service status
+    logs [N]    Show last N log lines (default 50)
+    logs -f     Follow logs in real-time
+    errors [N]  Show last N error lines
+    enable      Enable on boot
+    disable     Disable on boot
+    debug       Run in foreground (for debugging)
+    health      Quick health check
+    help        Show this help
+EOF
+        ;;
+esac
