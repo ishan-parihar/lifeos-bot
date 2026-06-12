@@ -1,12 +1,9 @@
 # Path: /home/ishanp/Documents/GitHub/MY-PROJECTS/LIFEOS/lifeos-bot/bot/handlers/journal.py
 
 import logging
-from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
-from config import settings
-from notion.client import notion_manager
-from notion.models import NotionPayloadBuilder as NB
+from services.journal import save_subjective_entry, get_subjective_entries, save_relational_entry, get_relational_entries, save_systemic_entry, get_systemic_entries
 from bot.keyboards import build_grid_keyboard, build_number_keyboard, build_main_menu
 
 logger = logging.getLogger(__name__)
@@ -75,34 +72,14 @@ async def _save_subjective(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif update.message:
         status_msg = await update.message.reply_text("Saving to Notion...")
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    parts = [f"E:{energy}" if energy else "", f"F:{focus}" if focus else "", f"H:{happiness}" if happiness else ""]
-    title_str = " | ".join(p for p in parts if p) or "Journal Entry"
-
-    properties = {
-        "Name": NB.title(f"{now} — {title_str}"),
-        "Date": NB.date(now),
-        "Gratitude": NB.rich_text(gratitude),
-    }
-    if energy is not None:
-        properties["Energy"] = NB.number(energy)
-    if focus is not None:
-        properties["Focus"] = NB.number(focus)
-    if happiness is not None:
-        properties["Happiness"] = NB.number(happiness)
-
-    try:
-        await notion_manager.create_page(settings.DATABASE_ID_SUBJECTIVE_JOURNAL, properties)
-        success = f"Subjective journal logged: {title_str}"
-    except Exception as e:
-        logger.error(f"Failed to save subjective journal: {e}")
-        success = f"Error: {e}"
+    result = await save_subjective_entry(energy=energy, focus=focus, happiness=happiness, gratitude=gratitude)
 
     reply_markup = build_main_menu()
+    msg = result["message"] if result["success"] else f"Error: {result['message']}"
     if update.callback_query:
-        await update.callback_query.edit_message_text(success, reply_markup=reply_markup)
+        await update.callback_query.edit_message_text(msg, reply_markup=reply_markup)
     else:
-        await status_msg.edit_text(success, reply_markup=reply_markup)
+        await status_msg.edit_text(msg, reply_markup=reply_markup)
     return ConversationHandler.END
 
 
@@ -160,27 +137,14 @@ async def _save_relational(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     elif update.message:
         status_msg = await update.message.reply_text("Saving to Notion...")
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    properties = {
-        "Name": NB.title(f"{person} — {now}"),
-        "Date": NB.date(now),
-        "Insights": NB.rich_text(insights),
-    }
-    if quality is not None:
-        properties["Connection Quality"] = NB.number(quality)
-
-    try:
-        await notion_manager.create_page(settings.DATABASE_ID_RELATIONAL_JOURNAL, properties)
-        success = f"Relational journal logged: {person}"
-    except Exception as e:
-        logger.error(f"Failed to save relational journal: {e}")
-        success = f"Error: {e}"
+    result = await save_relational_entry(person=person, connection_quality=quality, insights=insights)
 
     reply_markup = build_main_menu()
+    msg = result["message"] if result["success"] else f"Error: {result['message']}"
     if update.callback_query:
-        await update.callback_query.edit_message_text(success, reply_markup=reply_markup)
+        await update.callback_query.edit_message_text(msg, reply_markup=reply_markup)
     else:
-        await status_msg.edit_text(success, reply_markup=reply_markup)
+        await status_msg.edit_text(msg, reply_markup=reply_markup)
     return ConversationHandler.END
 
 
@@ -212,21 +176,8 @@ async def _save_systemic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     status_msg = await update.message.reply_text("Saving to Notion...")
 
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    properties = {
-        "Name": NB.title(f"Systemic Review — {now}"),
-        "Date": NB.date(now),
-        "Bottlenecks": NB.rich_text(bottlenecks),
-        "Actionable Items": NB.rich_text(actions),
-        "Done": NB.checkbox(False),
-    }
+    result = await save_systemic_entry(bottlenecks=bottlenecks, actionable_items=actions)
 
-    try:
-        await notion_manager.create_page(settings.DATABASE_ID_SYSTEMIC_JOURNAL, properties)
-        success = "Systemic journal logged."
-    except Exception as e:
-        logger.error(f"Failed to save systemic journal: {e}")
-        success = f"Error: {e}"
-
-    await status_msg.edit_text(success, reply_markup=build_main_menu())
+    msg = result["message"] if result["success"] else f"Error: {result['message']}"
+    await status_msg.edit_text(msg, reply_markup=build_main_menu())
     return ConversationHandler.END

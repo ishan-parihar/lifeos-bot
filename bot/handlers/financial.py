@@ -1,13 +1,10 @@
 # Path: /home/ishanp/Documents/GitHub/MY-PROJECTS/LIFEOS/lifeos-bot/bot/handlers/financial.py
 
 import logging
-from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
-from config import settings
-from notion.client import notion_manager
-from notion.models import NotionPayloadBuilder as NB
 from bot.keyboards import build_grid_keyboard, build_main_menu
+from services.financial import save_financial_entry, get_financial_categories
 
 logger = logging.getLogger(__name__)
 
@@ -51,12 +48,7 @@ async def amount_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     context.user_data["fin_amount"] = amount
 
-    categories = await notion_manager.get_select_property_options(
-        database_id=settings.DATABASE_ID_FINANCIAL_LOG,
-        property_name="Category",
-    )
-    if not categories:
-        categories = ["Food", "Transport", "Utilities", "Housing", "Entertainment", "Shopping", "Salary", "Other"]
+    categories = await get_financial_categories()
 
     keyboard = build_grid_keyboard(categories, "fin_cat")
     await update.message.reply_text(
@@ -108,25 +100,18 @@ async def _save_financial(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     elif update.message:
         status_msg = await update.message.reply_text("Saving to Notion...")
 
-    sign = -1 if tx_type == "Expense" else 1
-    properties = {
-        "Name": NB.title(f"{tx_type}: {category} — {amount}"),
-        "Type": NB.select(tx_type),
-        "Amount": NB.number(sign * amount),
-        "Category": NB.select(category),
-        "Date": NB.date(datetime.now(timezone.utc).isoformat()),
-        "Notes": NB.rich_text(note),
-    }
+    result = await save_financial_entry(
+        type_=tx_type,
+        amount=amount,
+        category=category,
+        notes=note,
+    )
 
-    try:
-        await notion_manager.create_page(
-            database_id=settings.DATABASE_ID_FINANCIAL_LOG,
-            properties=properties,
-        )
+    if result["success"]:
         success = f"Logged {tx_type}: {category} — {amount}"
-    except Exception as e:
-        logger.error(f"Failed to save financial entry: {e}")
-        success = f"Error saving to Notion: {e}"
+    else:
+        logger.error(f"Failed to save financial entry: {result['error']}")
+        success = f"Error saving to Notion: {result['error']}"
 
     reply_markup = build_main_menu()
     if update.callback_query:

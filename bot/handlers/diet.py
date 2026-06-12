@@ -1,12 +1,9 @@
 # Path: /home/ishanp/Documents/GitHub/MY-PROJECTS/LIFEOS/lifeos-bot/bot/handlers/diet.py
 
 import logging
-from datetime import datetime, timezone
 from telegram import Update
 from telegram.ext import ContextTypes, ConversationHandler
-from config import settings
-from notion.client import notion_manager
-from notion.models import NotionPayloadBuilder as NB
+from services.diet import get_meal_types, save_diet_entry
 from bot.keyboards import build_grid_keyboard, build_main_menu
 
 logger = logging.getLogger(__name__)
@@ -20,12 +17,7 @@ async def start_diet_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     query = update.callback_query
     await query.answer()
 
-    meals = await notion_manager.get_select_property_options(
-        database_id=settings.DATABASE_ID_DIET_LOG,
-        property_name="Meal Type",
-    )
-    if not meals:
-        meals = ["Breakfast", "Lunch", "Dinner", "Snack"]
+    meals = await get_meal_types()
 
     keyboard = build_grid_keyboard(meals, "diet_meal")
     await query.edit_message_text("Select meal type:", reply_markup=keyboard)
@@ -108,7 +100,7 @@ async def note_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
 
 async def _save_diet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Constructs the Notion payload and saves the diet log entry."""
+    """Saves the diet log entry via the service layer."""
     meal = context.user_data.get("diet_meal", "Snack")
     description = context.user_data.get("diet_description", "")
     calories = context.user_data.get("diet_calories")
@@ -120,27 +112,16 @@ async def _save_diet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     elif update.message:
         status_msg = await update.message.reply_text("Saving to Notion...")
 
-    properties = {
-        "Name": NB.title(f"{meal}: {description}"),
-        "Meal Type": NB.select(meal),
-        "Meal Description": NB.rich_text(description),
-        "Date": NB.date(datetime.now(timezone.utc).isoformat()),
-        "Notes": NB.rich_text(note),
-    }
-    if calories is not None:
-        properties["Calories"] = NB.number(calories)
+    result = await save_diet_entry(
+        meal_type=meal,
+        meal_description=description,
+        notes=note,
+        calories=calories,
+    )
 
-    try:
-        await notion_manager.create_page(
-            database_id=settings.DATABASE_ID_DIET_LOG,
-            properties=properties,
-        )
-        success = f"Logged {meal}: {description}"
-        if calories:
-            success += f" ({calories} cal)"
-    except Exception as e:
-        logger.error(f"Failed to save diet entry: {e}")
-        success = f"Error saving to Notion: {e}"
+    success = result.get("message", "Diet entry logged.")
+    if not result.get("success", False):
+        logger.error(f"Failed to save diet entry: {success}")
 
     reply_markup = build_main_menu()
     if update.callback_query:

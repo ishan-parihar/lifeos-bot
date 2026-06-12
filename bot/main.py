@@ -64,6 +64,9 @@ from bot.handlers.activity import (
     edit_end_hour_chosen,
     edit_end_minute_chosen,
     edit_end_minute_back,
+    edit_offset_chosen,
+    edit_start_custom,
+    edit_end_custom,
     delete_entry_confirm,
     show_gaps_callback,
     check_activity_gaps,
@@ -76,6 +79,7 @@ from bot.handlers.activity import (
     EDT_ENTER_DESC,
     EDT_CHOOSE_START,
     EDT_CHOOSE_END,
+    EDT_SHOW_OFFSETS,
 )
 
 # ── Financial handler ──
@@ -225,6 +229,11 @@ def build_edit_time_conversation() -> ConversationHandler:
     return ConversationHandler(
         entry_points=[CallbackQueryHandler(edit_time_start, pattern="^edt_time:")],
         states={
+            EDT_SHOW_OFFSETS: [
+                CallbackQueryHandler(edit_offset_chosen, pattern="^edt_offset:"),
+                CallbackQueryHandler(edit_start_custom, pattern="^edt_start_custom$"),
+                CallbackQueryHandler(edit_end_custom, pattern="^edt_end_custom$"),
+            ],
             EDT_CHOOSE_START: [
                 CallbackQueryHandler(edit_start_hour_chosen, pattern="^edt_sh:"),
                 CallbackQueryHandler(edit_start_minute_chosen, pattern="^edt_sm:"),

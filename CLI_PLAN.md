@@ -1,571 +1,433 @@
-# LifeOS CLI Implementation Plan
+# LifeOS CLI — AI Agent Interface
 
-## Architecture Overview
+## Vision
 
-The goal is to extract business logic from Telegram-coupled handlers into a **pure service layer**, then build a **typer CLI** on top of it. This enables both human CLI usage and AI agent automation.
+The CLI is **not for humans**. It's a programmatic Telegram simulator for AI agents. The CLI speaks the exact same protocol as the Telegram bot — messages + inline keyboards — but over stdin/stdout. This lets AI agents do autonomous testing, debugging, and evolution of lifeos-bot code.
+
+**Why a Telegram simulator?** The Telegram bot is the source of truth. Its screens, keyboards, and conversation flows are the real interface. Rather than building a parallel CLI that duplicates this logic, we simulate the Telegram bot directly. Every CLI output is a screen with text + buttons. Every CLI input is a callback_data selection. The AI agent navigates the same state machine as a Telegram user.
+
+## Architecture
 
 ```
-┌─────────────────┐     ┌─────────────────┐
-│  Telegram Bot    │     │  typer CLI       │
-│  (existing)      │     │  (new)           │
-└────────┬────────┘     └────────┬────────┘
-         │                       │
-         ▼                       ▼
-┌─────────────────────────────────────────┐
-│           Service Layer                 │
-│  (services/) — pure business logic      │
-│  No Telegram or CLI dependencies        │
-└────────────────────┬────────────────────┘
-                     │
-         ┌───────────┴───────────┐
-         ▼                       ▼
-┌─────────────────┐     ┌─────────────────┐
-│  notion/client  │     │  bot/insights   │
-│  (existing)     │     │  (existing)     │
-└─────────────────┘     └─────────────────┘
+┌─────────────────────────────────────────────────┐
+│                Telegram Bot (existing)           │
+│  Screen → Message + InlineKeyboardMarkup         │
+│  Navigation → callback_data handler              │
+└──────────────────────┬──────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────┐
+│              Service Layer (services/)           │
+│  Pure business logic — no Telegram dependency    │
+│  log_activity(), detect_gaps(), update_entry()   │
+└──────────────────────┬──────────────────────────┘
+                       │
+          ┌────────────┴────────────┐
+          ▼                         ▼
+┌─────────────────┐     ┌──────────────────────────┐
+│ Telegram Bot    │     │ CLI Telegram Simulator   │
+│ (existing)      │     │ (new)                    │
+│ Message + KB    │     │ Screen + Buttons (TOON)  │
+│ via PTB API     │     │ via stdin/stdout          │
+└─────────────────┘     └──────────────────────────┘
 ```
 
----
+### Key Design Decisions
 
-## Phase 1: Service Layer Extraction
+1. **CLI reuses `bot/formatting.py`** — same HTML rendering, same visual layout
+2. **CLI reuses `bot/keyboards.py`** — same inline keyboard structure, same callback_data strings
+3. **CLI reuses `services/`** — same business logic, no duplication
+4. **CLI outputs TOON format** — AI agents parse cheaply, 30-60% fewer tokens than JSON
+5. **CLI maintains session state** — disk-persisted, multi-turn conversations via `--session` flag
 
-### New module: `services/__init__.py`
+## Protocol
 
-Empty init file.
+### Screen Output (CLI → AI Agent)
 
-### New module: `services/activity.py`
+Every CLI command returns a **screen** — the exact same text + buttons the Telegram bot would send:
 
-**Extract from `bot/handlers/activity.py`:**
-
-| Current Location | Service Function | Description |
-|---|---|---|
-| `_save_activity` (line ~790) | `log_activity(start, end, type, desc, note)` → `ActivityEntry` | Creates activity entry, returns saved entry with ID |
-| `_compute_time_suggestions` (line ~329) | `compute_time_suggestions(entries_48h, now, last_saved_end)` → `List[TimeSuggestion]` | Gap-based time suggestions |
-| Dashboard rendering logic (line ~69) | `get_dashboard_data()` → `DashboardData` | Stats, categories, predictions |
-| `daily_view_callback` (line ~555) | `get_entries_for_window(start, end)` → `List[ActivityEntry]` | Query entries for a time window |
-| `show_entry_detail` (line ~620) | `get_entry_detail(page_id)` → `ActivityEntry` | Fetch single entry |
-| `edit_type_chosen` (line ~695) | `update_entry_type(page_id, new_type)` → `ActivityEntry` | Update entry type |
-| `edit_desc_entered` (line ~735) | `update_entry_desc(page_id, new_desc)` → `ActivityEntry` | Update entry description |
-| `edit_end_minute_chosen` (line ~810) | `update_entry_times(page_id, new_start, new_end)` → `ActivityEntry` | Update entry times |
-| `edit_notes_entered` (line ~870) | `update_entry_notes(page_id, new_notes)` → `ActivityEntry` | Update entry notes |
-| `delete_entry_confirm` (line ~895) | `delete_entry(page_id)` → `bool` | Delete/archive entry |
-| `check_activity_gaps` (line ~1050) | `detect_gaps(min_hours=4)` → `List[Gap]` | Find gaps in entries |
-| `add_adjacent_before/after` logic | `compute_adjacent_suggestions(entry, direction)` → `List[TimeSuggestion]` | Adjacent entry suggestions |
-
-**Key data structures (defined in `services/activity.py`):**
-
-```python
-@dataclass
-class ActivityEntry:
-    id: str
-    page_id: str
-    title: str
-    activity_type: str
-    activity_notes: str
-    start: datetime
-    end: datetime
-    duration_hrs: float
-
-@dataclass
-class TimeSuggestion:
-    label: str
-    start: datetime
-    end: datetime
-    start_only: bool = False
-
-@dataclass
-class DashboardData:
-    entries_48h: int
-    hrs_48h: float
-    entries_7d: int
-    hrs_7d: float
-    entries_30d: int
-    hrs_30d: float
-    category_breakdown: List[Tuple[str, float]]
-    insights: str  # rendered HTML/text
-    predictions: List[Tuple[str, float, str]]
-    suggestions: List[str]
-    recent_entries: List[ActivityEntry]
-
-@dataclass
-class Gap:
-    date: str
-    start: str
-    end: str
-    hours: float
-    start_dt: datetime
-    end_dt: datetime
+```toon
+screen
+  text: "📅 Activity Log — Jun 10 (Tue)\n\n12:00-13:00 Work (1h)\n14:00-15:30 Reading (1.5h)\n..."
+  buttons
+    "➕ Log New" callback_data: "log_new"
+    "◀ Prev Day" callback_data: "prev_day"
+    "▶ Next Day" callback_data: "next_day"
+    "🏠 Dashboard" callback_data: "dashboard"
+  session: "cli_abc123"
+  state: "viewing_activity_log"
 ```
 
-### New module: `services/financial.py`
+### Screen Input (AI Agent → CLI)
 
-**Extract from `bot/handlers/financial.py`:**
+The AI agent navigates by sending callback_data selections:
 
-| Current Location | Service Function | Description |
-|---|---|---|
-| `_save_financial` (line ~98) | `log_transaction(type, amount, category, note)` → `dict` | Creates financial entry |
-| `amount_entered` (line ~41) | `get_categories()` → `List[str]` | Fetch available categories |
-
-### New module: `services/diet.py`
-
-**Extract from `bot/handlers/diet.py`:**
-
-| Current Location | Service Function | Description |
-|---|---|---|
-| `_save_diet` (line ~110) | `log_meal(meal_type, description, calories, note)` → `dict` | Creates diet entry |
-| `start_diet_flow` (line ~18) | `get_meal_types()` → `List[str]` | Fetch available meal types |
-
-### New module: `services/journal.py`
-
-**Extract from `bot/handlers/journal.py`:**
-
-| Current Location | Service Function | Description |
-|---|---|---|
-| `_save_subjective` (line ~67) | `log_subjective(energy, focus, happiness, gratitude)` → `dict` | Creates subjective journal |
-| `_save_relational` (line ~153) | `log_relational(person, quality, insights)` → `dict` | Creates relational journal |
-| `_save_systemic` (line ~209) | `log_systemic(bottlenecks, actions)` → `dict` | Creates systemic journal |
-
-### New module: `services/dashboard.py`
-
-**Extract from `bot/handlers/base.py` and `bot/formatting.py`:**
-
-| Current Location | Service Function | Description |
-|---|---|---|
-| `_build_main_dashboard` (line ~20) | `get_main_dashboard()` → `DashboardSummary` | Main hub data |
-| — | `get_insights(entries)` → `InsightsData` | Pattern analysis wrapper |
-| — | `get_rolling_view(start, end)` → `RollingViewData` | Rolling view data |
-
-**Key data structures:**
-
-```python
-@dataclass
-class DashboardSummary:
-    entries_48h: int
-    hrs_48h: float
-    untracked_hrs: float
-    tracked_pct: float
-    last_entry: Optional[ActivityEntry]
-    untracked_since: Optional[str]
-    top_categories: List[Tuple[str, float]]
-
-@dataclass
-class InsightsData:
-    most_consistent: Optional[Tuple[str, float]]  # (type, avg_hour)
-    avg_sessions: List[Tuple[str, float]]  # (type, avg_duration)
-    gap_pattern: Optional[dict]
-    dow_peak: Optional[str]
-    consistency: dict
-    predictions: List[Tuple[str, float, str]]
+```bash
+python -m lifeos simulate --action "log_new" --session "cli_abc123"
 ```
 
----
+Or via stdin (for continuous sessions):
 
-## Phase 2: CLI Implementation
+```bash
+echo '{"action": "log_new", "session": "cli_abc123"}' | python -m lifeos simulate
+```
 
-### New module: `cli/__init__.py`
+### State Machine
 
-Empty init.
+The CLI maintains the same conversation states as the Telegram bot:
 
-### New module: `cli/__main__.py`
+```
+start → viewing_dashboard
+      → viewing_activity_log → viewing_entry_detail → editing_type
+                                                    → editing_desc
+                                                    → editing_time
+                                                    → editing_notes
+                                                    → deleting
+      → logging_activity → picking_type → entering_desc → confirming
+      → viewing_gaps → fast_adding → confirming
+      → logging_financial → entering_amount → picking_category → confirming
+      → logging_diet → picking_meal → entering_desc → confirming
+      → logging_subjective → entering_energy → entering_focus → entering_happiness → confirming
+      → logging_relational → entering_person → entering_quality → confirming
+      → logging_systemic → entering_bottlenecks → entering_actions → confirming
+```
+
+## Implementation
+
+### Phase 1: Service Layer
+
+Extract business logic from handlers into `services/`. This is prerequisite for both the Telegram bot refactoring and the CLI simulator.
+
+| Module | Functions | Source |
+|--------|-----------|--------|
+| `services/activity.py` | `log_activity()`, `get_entries()`, `update_entry()`, `delete_entry()`, `detect_gaps()`, `compute_suggestions()` | `bot/handlers/activity.py` |
+| `services/financial.py` | `log_transaction()`, `get_categories()` | `bot/handlers/financial.py` |
+| `services/diet.py` | `log_meal()`, `get_meal_types()` | `bot/handlers/diet.py` |
+| `services/journal.py` | `log_subjective()`, `log_relational()`, `log_systemic()` | `bot/handlers/journal.py` |
+| `services/dashboard.py` | `get_main_dashboard()`, `get_insights()`, `get_rolling_view()` | `bot/handlers/base.py` |
+
+### Phase 2: Screen Builders
+
+Reuse existing `bot/formatting.py` and `bot/keyboards.py`. The CLI calls the same functions the Telegram handlers call, then renders the output as TOON instead of sending via PTB API.
+
+### Phase 3: CLI Simulator
+
+#### Entry Point: `cli/__main__.py`
 
 ```python
 import typer
-from cli import activity, financial, diet, journal, dashboard, discovery
+from cli import simulate, debug, direct
 
 app = typer.Typer(
     name="lifeos",
-    help="LifeOS — manage your Notion life-tracking databases from the CLI",
+    help="LifeOS — AI agent interface for Telegram bot simulation",
     no_args_is_help=True,
 )
-app.add_typer(activity.app, name="activity")
-app.add_typer(financial.app, name="financial")
-app.add_typer(diet.app, name="diet")
-app.add_typer(journal.app, name="journal")
-app.add_typer(dashboard.app, name="dashboard")
-app.add_typer(discovery.app, name="discovery")
-
-if __name__ == "__main__":
-    app()
+app.add_typer(simulate.app, name="simulate")
+app.add_typer(debug.app, name="debug")
+app.add_typer(direct.app, name="direct")
 ```
 
-### New module: `cli/activity.py`
+#### Module: `cli/simulate.py` — Telegram Simulator
 
 ```python
-app = typer.Typer(help="Activity log management")
+app = typer.Typer(help="Simulate Telegram bot conversation flow")
 
-@app.command()
-def log(
-    type: str = typer.Option(..., help="Activity type"),
-    start: str = typer.Option(..., help="Start time (YYYY-MM-DD HH:MM)"),
-    end: str = typer.Option(..., help="End time (YYYY-MM-DD HH:MM)"),
-    desc: str = typer.Option("", help="Description"),
-    note: str = typer.Option("", help="Notes"),
+@app.command("start")
+def start_session(
+    session: str = typer.Option(None, help="Session ID (auto-generate if omitted)"),
+    format: str = typer.Option("toon", help="Output format: toon, json, text"),
 ):
-    """Log a new activity entry."""
-    # Parse times, call services.log_activity()
+    """Start a new CLI session. Returns initial screen (dashboard)."""
 
-@app.command()
-def dashboard():
-    """Show activity dashboard with stats and insights."""
-    # Call services.get_dashboard_data()
-
-@app.command()
-def view(
-    date: str = typer.Option("today", help="Date or 'today'/'yesterday'"),
+@app.command("send")
+def send_action(
+    action: str = typer.Argument(..., help="callback_data string to send"),
+    session: str = typer.Option(..., help="Session ID"),
+    input_text: str = typer.Option(None, help="Text input for free-text screens"),
+    format: str = typer.Option("toon", help="Output format"),
 ):
-    """View entries for a specific date/window."""
-    # Call services.get_entries_for_window()
+    """Send an action (callback_data) to the current session. Returns next screen."""
 
-@app.command()
-def edit(
-    page_id: str = typer.Argument(..., help="Entry page ID"),
-    type: str = typer.Option(None, help="New activity type"),
-    desc: str = typer.Option(None, help="New description"),
-    start: str = typer.Option(None, help="New start time"),
-    end: str = typer.Option(None, help="New end time"),
-    note: str = typer.Option(None, help="New notes"),
+@app.command("status")
+def session_status(
+    session: str = typer.Option(..., help="Session ID"),
+    format: str = typer.Option("toon", help="Output format"),
 ):
-    """Edit an existing activity entry."""
-    # Call appropriate service functions
+    """Show current session state and history."""
 
-@app.command()
-def delete(page_id: str = typer.Argument(...)):
-    """Delete/archive an activity entry."""
-    # Call services.delete_entry()
-
-@app.command()
-def gaps(days: int = typer.Option(7, help="Look back N days")):
-    """Show gap report."""
-    # Call services.detect_gaps()
-
-@app.command()
-def types():
-    """List available activity types."""
-    # Call notion_manager.get_activity_types()
-
-@app.command()
-def search(query: str = typer.Argument(...)):
-    """Search entries by type, notes, or date range."""
-    # Implemented via query_activity_entries with filters
-```
-
-### New module: `cli/financial.py`
-
-```python
-app = typer.Typer(help="Financial log management")
-
-@app.command()
-def log(
-    type: str = typer.Option(..., help="Expense or Income"),
-    amount: float = typer.Option(..., help="Amount"),
-    category: str = typer.Option(..., help="Category"),
-    note: str = typer.Option("", help="Notes"),
+@app.command("reset")
+def reset_session(
+    session: str = typer.Option(..., help="Session ID"),
 ):
-    """Log a financial transaction."""
-
-@app.command()
-def categories():
-    """List available categories."""
+    """Clear session state."""
 ```
 
-### New module: `cli/diet.py`
+#### Module: `cli/direct.py` — Direct Commands (No State)
+
+For one-shot operations that don't need conversation flow:
 
 ```python
-app = typer.Typer(help="Diet log management")
+app = typer.Typer(help="Direct commands (no session state)")
 
-@app.command()
-def log(
-    meal: str = typer.Option(..., help="Meal type"),
-    description: str = typer.Option(..., help="What you ate"),
-    calories: int = typer.Option(None, help="Calories (optional)"),
-    note: str = typer.Option("", help="Notes"),
+@app.command("activity")
+def activity_direct(
+    action: str = typer.Option(..., help="log, view, gaps, search, timeline"),
+    type: str = typer.Option(None),
+    start: str = typer.Option(None),
+    end: str = typer.Option(None),
+    desc: str = typer.Option(None),
+    page_id: str = typer.Option(None),
+    days: int = typer.Option(None),
+    format: str = typer.Option("toon", help="Output format"),
+    dry_run: bool = typer.Option(False),
 ):
-    """Log a meal."""
-
-@app.command()
-def meals():
-    """List available meal types."""
+    """Direct activity operations without conversation flow."""
 ```
 
-### New module: `cli/journal.py`
+#### Module: `cli/debug.py` — Debugging Commands
 
 ```python
-app = typer.Typer(help="Journal management")
+app = typer.Typer(help="Debugging and diagnostics")
 
-@app.command()
-def subjective(
-    energy: int = typer.Option(None, help="Energy 1-10"),
-    focus: int = typer.Option(None, help="Focus 1-10"),
-    happiness: int = typer.Option(None, help="Happiness 1-10"),
-    gratitude: str = typer.Option("", help="Gratitude text"),
+@app.command("notion-consistency")
+def notion_consistency(
+    page_id: str = typer.Option(None),
+    minutes_ago: int = typer.Option(5),
+    format: str = typer.Option("toon"),
 ):
-    """Log subjective journal entry."""
+    """Check Notion eventual consistency status."""
 
-@app.command()
-def relational(
-    person: str = typer.Option(..., help="Person name"),
-    quality: int = typer.Option(None, help="Connection quality 1-10"),
-    insights: str = typer.Option("", help="Insights"),
+@app.command("timeline-verify")
+def timeline_verify(
+    page_id: str = typer.Argument(...),
+    format: str = typer.Option("toon"),
 ):
-    """Log relational journal entry."""
+    """Verify entry appears in timeline queries."""
 
-@app.command()
-def systemic(
-    bottlenecks: str = typer.Option(..., help="Current bottlenecks"),
-    actions: str = typer.Option(..., help="Actionable changes"),
+@app.command("cache-status")
+def cache_status(format: str = typer.Option("toon")):
+    """Show cache hit rate and staleness."""
+
+@app.command("service-health")
+def service_health(format: str = typer.Option("toon")):
+    """Check all service connections."""
+
+@app.command("audit-telegram-parity")
+def audit_parity(format: str = typer.Option("toon")):
+    """Cross-reference Telegram features against CLI commands."""
+
+@app.command("state-machine")
+def state_machine(
+    format: str = typer.Option("toon"),
 ):
-    """Log systemic journal entry."""
+    """Dump all valid states and transitions."""
 ```
 
-### New module: `cli/dashboard.py`
+### Phase 4: TOON Output Format
 
+The CLI outputs screens in TOON format — a compact serialization optimized for AI agents:
+
+```toon
+# Dashboard Screen
+screen: dashboard
+text: "🏠 LifeOS Dashboard\n\n📊 48h: 8 entries, 12.5h tracked\n📅 7d: 28 entries, 45h tracked\n..."
+buttons:
+  1: "📊 Activity Log" → activity_log
+  2: "💰 Financial Log" → financial_log
+  3: "🍽 Diet Log" → diet_log
+  4: "📝 Journal" → journal_menu
+  5: "📈 Insights" → insights
+session: "cli_abc123"
+state: "viewing_dashboard"
+timestamp: "2026-06-10T16:17:37+05:30"
+```
+
+**TOON benefits for AI agents:**
+- 30-60% fewer tokens than JSON
+- Buttons are indexed for easy selection: `"1"` to press button 1
+- `session` and `state` fields enable multi-turn tracking
+- `timestamp` enables timing-dependent debugging
+
+**Parsing by AI agent:**
 ```python
-app = typer.Typer(help="Dashboard and insights")
-
-@app.command()
-def main():
-    """Show main LifeOS dashboard."""
-
-@app.command()
-def insights(days: int = typer.Option(30)):
-    """Show pattern analysis and predictions."""
+from toon_format import decode
+screen = decode(toon_output)
+# screen["buttons"]["1"] → "📊 Activity Log"
+# screen["state"] → "viewing_dashboard"
+# screen["session"] → "cli_abc123"
 ```
 
-### New module: `cli/discovery.py`
+### Phase 5: Session Persistence
 
-```python
-app = typer.Typer(help="Database discovery and management")
-
-@app.command()
-def discover():
-    """Discover Notion databases and update .env."""
-
-@app.command()
-def status():
-    """Show current database IDs and connection status."""
-```
-
----
-
-## Phase 3: Refactor Telegram Handlers
-
-After the service layer is built and tested, refactor each handler to call service functions instead of inline logic.
-
-### Refactoring pattern:
-
-**Before:**
-```python
-# bot/handlers/financial.py
-async def _save_financial(update, context):
-    tx_type = context.user_data.get("fin_type")
-    amount = context.user_data.get("fin_amount")
-    category = context.user_data.get("fin_category")
-    note = context.user_data.get("fin_note")
-    # ... build Notion payload inline ...
-    properties = {"Name": NB.title(...), "Type": NB.select(...), ...}
-    await notion_manager.create_page(settings.DATABASE_ID_FINANCIAL_LOG, properties)
-    # ... format Telegram response inline ...
-```
-
-**After:**
-```python
-# bot/handlers/financial.py
-from services.financial import log_transaction
-
-async def _save_financial(update, context):
-    tx_type = context.user_data.get("fin_type")
-    amount = context.user_data.get("fin_amount")
-    category = context.user_data.get("fin_category")
-    note = context.user_data.get("fin_note")
-    result = await log_transaction(tx_type, amount, category, note)
-    # ... format Telegram response only ...
-```
-
-### Files to refactor (in order):
-1. `bot/handlers/financial.py` — simplest, good proof of concept
-2. `bot/handlers/diet.py` — similar structure
-3. `bot/handlers/journal.py` — three journal types
-4. `bot/handlers/activity.py` — most complex, do last
-5. `bot/handlers/base.py` — dashboard rendering
-
----
-
-## Phase 4: Add `__main__.py` Entry Point
-
-### New file: `__main__.py` (project root)
-
-```python
-#!/usr/bin/env python3
-"""Allow running as `python -m lifeos-bot` or `lifeos`."""
-from cli.__main__ import app
-app()
-```
-
-### Update `pyproject.toml` or create one:
-
-```toml
-[project.scripts]
-lifeos = "cli.__main__:app"
-```
-
-Or if keeping `requirements.txt`-only:
+Sessions are persisted to disk at `~/.lifeos/cli_sessions/`:
 
 ```
-# Add to requirements.txt
-typer>=0.9.0
-rich>=13.0.0  # for nice terminal output
+~/.lifeos/cli_sessions/
+├── cli_abc123.json    # {state, history, context}
+├── cli_def456.json
+└── ...
 ```
 
----
-
-## Phase 5: Output Formatting
-
-### New module: `cli/formatting.py`
-
-Plain-text formatting for CLI output (as opposed to `bot/formatting.py` which uses Telegram HTML).
-
-```python
-# Uses rich for beautiful terminal output
-from rich.console import Console
-from rich.table import Table
-from rich.panel import Panel
-from rich.text import Text
-
-console = Console()
-
-def print_dashboard(data: DashboardData): ...
-def print_entries(entries: List[ActivityEntry]): ...
-def print_gap_report(gaps: List[Gap]): ...
-def print_insights(insights: InsightsData): ...
-def print_entry_detail(entry: ActivityEntry): ...
+Session file structure:
+```json
+{
+  "id": "cli_abc123",
+  "state": "viewing_dashboard",
+  "context": {
+    "current_date": "2026-06-10",
+    "selected_entry": "page_123",
+    "filter": null
+  },
+  "history": [
+    {"action": "start", "screen": "dashboard", "timestamp": "2026-06-10T16:17:37+05:30"},
+    {"action": "activity_log", "screen": "activity_log", "timestamp": "2026-06-10T16:17:45+05:30"}
+  ]
+}
 ```
 
----
-
-## File Structure (Final)
+## File Structure
 
 ```
 lifeos-bot/
-├── cli/                          # NEW — CLI layer
+├── cli/                          # NEW — AI agent interface
 │   ├── __init__.py
-│   ├── __main__.py              # typer app registration
-│   ├── activity.py              # activity commands
-│   ├── financial.py             # financial commands
-│   ├── diet.py                  # diet commands
-│   ├── journal.py               # journal commands
-│   ├── dashboard.py             # dashboard/insights commands
-│   ├── discovery.py             # DB discovery commands
-│   └── formatting.py            # rich terminal output
+│   ├── __main__.py              # Entry point
+│   ├── simulate.py              # Telegram simulator (start, send, status, reset)
+│   ├── direct.py                # Direct commands (no session state)
+│   ├── debug.py                 # Debugging diagnostics
+│   └── format.py                # TOON output formatting
 ├── services/                     # NEW — pure business logic
 │   ├── __init__.py
-│   ├── activity.py              # activity CRUD + analytics
-│   ├── financial.py             # financial CRUD
-│   ├── diet.py                  # diet CRUD
-│   ├── journal.py               # journal CRUD (all 3 types)
-│   └── dashboard.py             # dashboard data aggregation
-├── notion/                       # EXISTING — unchanged
-│   ├── client.py
-│   ├── models.py
-│   └── discovery.py
+│   ├── activity.py              # Activity CRUD + analytics
+│   ├── financial.py             # Financial CRUD
+│   ├── diet.py                  # Diet CRUD
+│   ├── journal.py               # Journal CRUD
+│   └── dashboard.py             # Dashboard aggregation
 ├── bot/                          # EXISTING — refactored to use services/
 │   ├── handlers/
-│   │   ├── activity.py
-│   │   ├── financial.py
-│   │   ├── diet.py
-│   │   ├── journal.py
-│   │   └── base.py
 │   ├── formatting.py
 │   ├── keyboards.py
-│   ├── insights.py
 │   └── main.py
+├── notion/                       # EXISTING — unchanged
 ├── __main__.py                   # NEW — entry point
-├── config.py                     # EXISTING — unchanged
-├── cache.py                      # EXISTING — unchanged
-├── run.py                        # EXISTING — unchanged
-└── requirements.txt              # UPDATED — add typer, rich
+└── pyproject.toml
 ```
-
----
 
 ## Implementation Order
 
 | Step | Task | Est. Lines | Dependencies |
 |------|------|-----------|--------------|
-| 1 | Create `services/` package with `__init__.py` | 5 | None |
-| 2 | Extract `services/financial.py` (simplest handler) | 60 | None |
+| 1 | Create `services/` package | 5 | None |
+| 2 | Extract `services/financial.py` | 60 | None |
 | 3 | Extract `services/diet.py` | 60 | None |
-| 4 | Extract `services/journal.py` (3 types) | 100 | None |
-| 5 | Extract `services/activity.py` (most complex) | 250 | None |
+| 4 | Extract `services/journal.py` | 100 | None |
+| 5 | Extract `services/activity.py` | 250 | None |
 | 6 | Extract `services/dashboard.py` | 80 | services/activity |
-| 7 | Create `cli/` package with `__init__.py` | 5 | None |
-| 8 | Create `cli/__main__.py` (typer app) | 20 | None |
-| 9 | Create `cli/activity.py` commands | 120 | services/activity |
-| 10 | Create `cli/financial.py` commands | 40 | services/financial |
-| 11 | Create `cli/diet.py` commands | 40 | services/diet |
-| 12 | Create `cli/journal.py` commands | 60 | services/journal |
-| 13 | Create `cli/dashboard.py` commands | 40 | services/dashboard |
-| 14 | Create `cli/discovery.py` commands | 30 | notion/discovery |
-| 15 | Create `cli/formatting.py` (rich output) | 100 | None |
-| 16 | Create `__main__.py` entry point | 10 | cli/__main__ |
-| 17 | Update `requirements.txt` | 2 | None |
-| 18 | Refactor `bot/handlers/financial.py` to use services | 30 | services/financial |
-| 19 | Refactor `bot/handlers/diet.py` to use services | 30 | services/diet |
-| 20 | Refactor `bot/handlers/journal.py` to use services | 40 | services/journal |
-| 21 | Refactor `bot/handlers/activity.py` to use services | 80 | services/activity |
-| 22 | Refactor `bot/handlers/base.py` to use services | 30 | services/dashboard |
-| 23 | Integration test — CLI + bot both work | — | All above |
+| 7 | Create `cli/` package | 5 | None |
+| 8 | Create `cli/format.py` (TOON output) | 80 | None |
+| 9 | Create `cli/simulate.py` (Telegram simulator) | 200 | services/*, cli/format |
+| 10 | Create `cli/direct.py` (one-shot commands) | 150 | services/*, cli/format |
+| 11 | Create `cli/debug.py` (debugging commands) | 120 | services/*, cache |
+| 12 | Create `__main__.py` entry point | 10 | cli/* |
+| 13 | Update `pyproject.toml` | 2 | None |
+| 14 | Refactor `bot/handlers/financial.py` | 30 | services/financial |
+| 15 | Refactor `bot/handlers/diet.py` | 30 | services/diet |
+| 16 | Refactor `bot/handlers/journal.py` | 40 | services/journal |
+| 17 | Refactor `bot/handlers/activity.py` | 80 | services/activity |
+| 18 | Refactor `bot/handlers/base.py` | 30 | services/dashboard |
+| 19 | Integration test | — | All above |
 
----
+## Usage Examples
 
-## CLI Usage Examples
+### AI Agent Workflow — Session-Based
 
 ```bash
-# Activity
-python -m lifeos-bot activity log --type "Work" --start "2026-06-10 09:00" --end "2026-06-10 11:00" --desc "Coding session" --note "Built CLI"
-python -m lifeos-bot activity dashboard
-python -m lifeos-bot activity view --date today
-python -m lifeos-bot activity gaps --days 7
-python -m lifeos-bot activity types
-python -m lifeos-bot activity edit <page_id> --type "Study"
-python -m lifeos-bot activity delete <page_id>
+# Start session → get dashboard screen
+SCREEN=$(python -m lifeos simulate start)
+SESSION=$(echo "$SCREEN" | python -c "from toon_format import decode; print(decode(sys.stdin.read())['session'])")
 
-# Financial
-python -m lifeos-bot financial log --type Expense --amount 42.50 --category Food --note "Lunch"
-python -m lifeos-bot financial categories
+# Navigate to activity log
+SCREEN=$(python -m lifeos simulate send "activity_log" --session "$SESSION")
 
-# Diet
-python -m lifeos-bot diet log --meal Lunch --description "Rice and curry" --calories 650
-python -m lifeos-bot diet meals
+# View today's entries
+SCREEN=$(python -m lifeos simulate send "view_today" --session "$SESSION")
 
-# Journals
-python -m lifeos-bot journal subjective --energy 8 --focus 7 --happiness 9 --gratitude "Good progress"
-python -m lifeos-bot journal relational --person "Alice" --quality 8 --insights "Great conversation"
-python -m lifeos-bot journal systemic --bottlenecks "Too many meetings" --actions "Block focus time"
-
-# Dashboard
-python -m lifeos-bot dashboard main
-python -m lifeos-bot dashboard insights --days 30
-
-# Discovery
-python -m lifeos-bot discovery discover
-python -m lifeos-bot discovery status
+# Log new activity
+SCREEN=$(python -m lifeos simulate send "log_new" --session "$SESSION")
+SCREEN=$(python -m lifeos simulate send "pick_type:Work" --session "$SESSION" --input-text "2026-06-10 09:00")
+SCREEN=$(python -m lifeos simulate send "pick_time:09:00-11:00" --session "$SESSION")
+SCREEN=$(python -m lifeos simulate send "confirm" --session "$SESSION")
 ```
 
----
+### AI Agent Workflow — Direct Commands
 
-## AI Agent Integration Path
+```bash
+# One-shot operations
+python -m lifeos direct activity --action log --type "Work" --start "2026-06-10 09:00" --end "2026-06-10 11:00"
+python -m lifeos direct activity --action gaps --days 7
+python -m lifeos direct activity --action timeline --days 3
+```
 
-Once the service layer exists, AI agents can call it directly:
+### Debugging Workflow
+
+```bash
+# Check Notion consistency
+python -m lifeos debug notion-consistency --page-id "page_123"
+
+# Verify entry appears in timeline
+python -m lifeos debug timeline-verify "page_123"
+
+# Check cache status
+python -m lifeos debug cache-status
+
+# Audit Telegram feature parity
+python -m lifeos debug audit-telegram-parity
+
+# Dump state machine
+python -m lifeos debug state-machine
+```
+
+## Telegram Feature Parity
+
+| Telegram Screen | CLI Screen Builder | Callback Data |
+|----------------|-------------------|---------------|
+| Main Dashboard | `formatting.build_main_dashboard()` | `dashboard` |
+| Activity Log | `formatting.build_activity_log()` | `activity_log` |
+| Entry Detail | `formatting.build_entry_detail()` | `entry_detail:{page_id}` |
+| Time Picker | `formatting.build_time_picker()` | `pick_time:{time}` |
+| Type Picker | `formatting.build_type_picker()` | `pick_type:{type}` |
+| Description Input | `formatting.build_desc_input()` | `enter_desc:{text}` |
+| Gap Report | `formatting.build_gap_report()` | `gaps` |
+| Fast Add | `formatting.build_fast_add()` | `fast_add:{gap_id}` |
+| Financial Log | `formatting.build_financial_log()` | `financial_log` |
+| Diet Log | `formatting.build_diet_log()` | `diet_log` |
+| Journal Menu | `formatting.build_journal_menu()` | `journal_menu` |
+| Insights | `formatting.build_insights()` | `insights` |
+
+## Dependencies
+
+```
+# Existing (unchanged)
+python-telegram-bot>=20.0
+notion-client
+
+# New (CLI)
+typer>=0.9.0
+rich>=13.0.0
+toon-format>=0.1.0
+```
+
+## Integration with AI Agents
+
+### Direct Python Import (Preferred)
 
 ```python
-# Direct service calls (no CLI needed)
-from services.activity import log_activity, get_dashboard_data, detect_gaps
-from services.financial import log_transaction
-from services.diet import log_meal
-from services.journal import log_subjective, log_relational, log_systemic
+from services.activity import log_activity, get_entries, detect_gaps
+from services.dashboard import get_main_dashboard
 
-# Example agent workflow:
-dashboard = await get_dashboard_data()
+# AI agent can call services directly
+dashboard = await get_main_dashboard()
 gaps = await detect_gaps(min_hours=4)
 if gaps:
     await log_activity(
@@ -576,4 +438,25 @@ if gaps:
     )
 ```
 
-For MCP (Model Context Protocol) integration later, wrap each service function as an MCP tool — the service layer makes this trivial.
+### CLI Subprocess (Fallback)
+
+```bash
+# For AI agents that can't import Python directly
+SCREEN=$(python -m lifeos simulate start)
+# Parse TOON output, navigate, act
+```
+
+### MCP Integration (Future)
+
+Wrap each service function as an MCP tool — the service layer makes this trivial:
+
+```python
+# mcp/tools.py
+from services.activity import log_activity, get_entries, detect_gaps
+
+@mcp.tool()
+async def log_activity(start: str, end: str, type: str, desc: str = "") -> str:
+    """Log an activity entry."""
+    entry = await log_activity(start, end, type, desc)
+    return toon_encode(entry)
+```

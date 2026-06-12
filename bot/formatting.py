@@ -141,7 +141,14 @@ def render_gap_report(gaps: List[dict]) -> str:
     lines = [bold(f"Gap Report — {len(gaps)} gap(s) >= 4h")]
     lines.append("")
     for g in gaps[:15]:
-        lines.append(f"  <code>{g['date']}</code>  {g['start']}-{g['end']}  ({fmt_dur(g['hours'])})")
+        if g.get("is_boundary"):
+            lines.append(
+                f"  <code>{g['start_date']} {g['start_time']}</code>"
+                f" → <code>{g['end_date']} {g['end_time']}</code>"
+                f"  ({fmt_dur(g['hours'])})"
+            )
+        else:
+            lines.append(f"  <code>{g['date']}</code>  {g['start']}-{g['end']}  ({fmt_dur(g['hours'])})")
     if len(gaps) > 15:
         lines.append(f"  ... and {len(gaps) - 15} more")
 
@@ -193,7 +200,13 @@ def render_rolling_view(
     window_end: datetime,
     gaps: List[dict],
 ) -> str:
-    """Renders entries in a rolling time window with duplicate/overlap flags."""
+    """Renders entries in a rolling time window with duplicate/overlap flags.
+
+    Gap dict formats supported:
+    - ``after_entry_id``: rendered after the entry whose page_id matches
+    - ``before_all``: rendered before all entries (boundary-start gap)
+    - ``after_all``: rendered after all entries (boundary-end gap)
+    """
     now = datetime.now(window_start.tzinfo) if window_start.tzinfo else datetime.now()
     start_str = fmt_time_with_date(window_start, now) if window_start.date() == window_end.date() else f"{window_start.strftime('%b %d')} {fmt_time(window_start)}"
     end_str = fmt_time_with_date(window_end, now) if window_start.date() == window_end.date() else f"{window_end.strftime('%b %d')} {fmt_time(window_end)}"
@@ -203,6 +216,10 @@ def render_rolling_view(
         "",
     ]
 
+    # Separate boundary gaps from entry gaps
+    before_gap = next((g for g in gaps if g.get("before_all")), None)
+    after_gap = next((g for g in gaps if g.get("after_all")), None)
+
     # Detect duplicates and overlaps
     issues = find_duplicates_and_overlaps(entries)
     dup_set = set(issues["duplicates"])
@@ -210,6 +227,12 @@ def render_rolling_view(
     for i, j in issues["overlaps"]:
         overlap_set.add(i)
         overlap_set.add(j)
+
+    # Before-entry boundary gap
+    if before_gap:
+        lines.append(f"  {separator()}")
+        lines.append(f"  {bold('GAP')} {fmt_dur(before_gap['hours'])} ({before_gap['start']} → {before_gap['end']})")
+        lines.append(f"  {separator()}")
 
     for idx, entry in enumerate(entries):
         start = entry.get("start")
@@ -236,8 +259,14 @@ def render_rolling_view(
         for gap in gaps:
             if gap.get("after_entry_id") == entry.get("page_id"):
                 lines.append(f"  {separator()}")
-                lines.append(f"  {bold('GAP')} {fmt_dur(gap['hours'])} ({gap['start']} - {gap['end']})")
+                lines.append(f"  {bold('GAP')} {fmt_dur(gap['hours'])} ({gap['start']} → {gap['end']})")
                 lines.append(f"  {separator()}")
+
+    # After-entry boundary gap
+    if after_gap:
+        lines.append(f"  {separator()}")
+        lines.append(f"  {bold('GAP')} {fmt_dur(after_gap['hours'])} ({after_gap['start']} → {after_gap['end']})")
+        lines.append(f"  {separator()}")
 
     total_hrs = sum(e.get("duration_hrs", 0) for e in entries)
     lines.append("")

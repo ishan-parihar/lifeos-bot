@@ -200,7 +200,7 @@ def build_entry_detail_keyboard(page_id: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="Back to Day", callback_data="act_view:today"),
-            InlineKeyboardButton(text="Back to Activity", callback_data="menu:main"),
+            InlineKeyboardButton(text="Back to Activity", callback_data="sub:activity"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -240,6 +240,41 @@ def build_journal_submenu() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="Systemic Journal", callback_data="menu:systemic_journal")],
         [InlineKeyboardButton(text="Back", callback_data="menu:main")],
     ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def build_edit_time_offset_keyboard(page_id: str) -> InlineKeyboardMarkup:
+    """
+    Time offset shortcut buttons for editing entry start/end times.
+    6 durations (15/30/45/60/90/120 min) x add/subtract for start and end = 24 buttons.
+    """
+    offsets = [15, 30, 45, 60, 75, 90, 105, 120]
+    keyboard: List[List[InlineKeyboardButton]] = []
+
+    def _add_offset_rows(target: str):
+        """Add 2 rows of subtract (6 buttons, 3 per row) then 2 rows of add."""
+        keyboard.append([InlineKeyboardButton(text=f"── {target.upper()} ──", callback_data="noop")])
+        for sign_char in ("-", "+"):
+            row: List[InlineKeyboardButton] = []
+            for mins in offsets:
+                row.append(InlineKeyboardButton(
+                    text=f"{sign_char}{mins}",
+                    callback_data=f"edt_offset:{target}:{sign_char}{mins}",
+                ))
+                if len(row) == 3:
+                    keyboard.append(row)
+                    row = []
+            if row:
+                keyboard.append(row)
+
+    _add_offset_rows("start")
+    _add_offset_rows("end")
+
+    keyboard.append([
+        InlineKeyboardButton(text="Custom Start", callback_data="edt_start_custom"),
+        InlineKeyboardButton(text="Custom End", callback_data="edt_end_custom"),
+    ])
+    keyboard.append([InlineKeyboardButton(text="Back to Entry", callback_data=f"act_entry:{page_id[:36]}")])
     return InlineKeyboardMarkup(keyboard)
 
 

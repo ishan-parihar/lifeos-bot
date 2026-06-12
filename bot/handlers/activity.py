@@ -1,13 +1,30 @@
 # Path: /home/ishanp/Documents/GitHub/MY-PROJECTS/LIFEOS/lifeos-bot/bot/handlers/activity.py
 
 import logging
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, timedelta, timezone, date, time
 from typing import Dict, Any, List, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes, ConversationHandler
 from config import settings
 from notion.client import notion_manager
 from notion.models import NotionPayloadBuilder as NB
+from services.activity import (
+    save_activity_entry,
+    get_activity_entries,
+    get_entry_detail,
+    get_activity_types,
+    get_activity_stats,
+    get_gaps,
+    update_entry_type,
+    update_entry_time,
+    calculate_offset,
+    delete_entry,
+    round_to_15 as _service_round_to_15,
+    hhmm_to_dt as _service_hhmm_to_dt,
+    dt_to_hhmm as _service_dt_to_hhmm,
+    parse_compact_dt,
+    fmt_time_with_date,
+)
 from bot.keyboards import (
     build_grid_keyboard,
     build_hour_keyboard,
@@ -17,13 +34,14 @@ from bot.keyboards import (
     build_activity_dashboard_with_entries_keyboard,
     build_rolling_view_keyboard,
     build_entry_detail_keyboard,
+    build_edit_time_offset_keyboard,
     build_confirm_keyboard,
     build_back_button,
 )
 from bot.formatting import (
-    fmt_dur, fmt_time, fmt_date, fmt_pct,
+    fmt_dur, fmt_time, fmt_date, fmt_pct, fmt_time_range,
     bold, escape,
-    render_dashboard, render_rolling_view, render_entry_detail, render_gap_report,
+    render_dashboard, render_rolling_view, render_entry_detail,
     render_mini_timeline, render_timeline_with_marker,
 )
 from bot.insights import analyze_patterns, predict_next_activity, render_insights_section, generate_smart_suggestions
@@ -37,31 +55,16 @@ CHOOSE_START, CHOOSE_END, CHOOSE_TYPE, ENTER_DESC = range(4)
 
 # ── Edit Conversation States ──
 EDT_CHOOSE_TYPE, EDT_ENTER_DESC, EDT_CHOOSE_START, EDT_CHOOSE_END = range(4, 8)
+EDT_SHOW_OFFSETS = 8  # time offset shortcut screen
 
-# Types that auto-skip description
-NO_DESC_TYPES = {"Sleep", "Meditation", "Recreation", "Gaming", "Reels", "Videos", "Nap"}
-
-
-# ── Helpers ──────────────────────────────────────────────────────────────────
-
-def round_to_15(dt: datetime) -> datetime:
-    minutes = dt.minute
-    rounded = (minutes + 7) // 15 * 15
-    if rounded == 60:
-        dt = dt.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
-    else:
-        dt = dt.replace(minute=rounded, second=0, microsecond=0)
-    return dt
+# (NO_DESC_TYPES removed - all types now prompt for description)
 
 
-def hhmm_to_dt(hhmm: str, base_date: date) -> datetime:
-    """Converts HHMM string to datetime on base_date."""
-    h, m = int(hhmm[:2]), int(hhmm[2:])
-    return datetime(base_date.year, base_date.month, base_date.day, h, m, tzinfo=TZ)
+# ── Helpers (delegated to services.activity) ─────────────────────────────────
 
-
-def dt_to_hhmm(dt: datetime) -> str:
-    return dt.strftime("%H%M")
+round_to_15 = _service_round_to_15
+hhmm_to_dt = _service_hhmm_to_dt
+dt_to_hhmm = _service_dt_to_hhmm
 
 
 # ── Activity Dashboard ───────────────────────────────────────────────────────
@@ -73,20 +76,18 @@ async def show_activity_dashboard(update: Update, context: ContextTypes.DEFAULT_
     await query.edit_message_text("Loading dashboard...")
 
     today = date.today()
-    now = datetime.now(TZ)
+    now = round_to_15(datetime.now(TZ))
 
-    # Fetch entries for 30 days (covers 48h, 7d, 30d)
-    # Sort descending so recent entries are always in the first page (100 limit)
+    # Fetch stats and entries using service layer
+    stats = await get_activity_stats(hours=48)
     month_ago = (today - timedelta(days=30)).isoformat()
     tomorrow = (today + timedelta(days=1)).isoformat()
-    all_entries = await notion_manager.query_activity_entries(month_ago, tomorrow, sort_ascending=False)
+    all_entries = await get_activity_entries(month_ago, tomorrow)
 
     # Sort ascending for timeline display and correct last-entry detection
     all_entries.sort(key=lambda e: e.get("start", datetime.min))
 
     # Split into time ranges using OVERLAP detection
-    # An entry overlaps a window if start < window_end AND end > window_start
-    # This catches long entries (e.g. 8h sleep) that started before the window
     h48_start = now - timedelta(hours=48)
     d7_start = datetime.combine(today - timedelta(days=7), datetime.min.time(), tzinfo=TZ)
 
@@ -95,28 +96,16 @@ async def show_activity_dashboard(update: Update, context: ContextTypes.DEFAULT_
         e = entry.get("end")
         if not s:
             return False
-        e = e or now  # if no end time, assume ongoing
+        e = e or now
         return s < window_end and e > window_start
 
     entries_48h = [e for e in all_entries if overlaps(e, h48_start, now)]
-    entries_7d = [e for e in all_entries if overlaps(e, d7_start, now)]
-    entries_30d = all_entries
 
-    def stats(entries):
-        count = len(entries)
-        total_hrs = sum(e.get("duration_hrs", 0) for e in entries)
-        return count, total_hrs
-
-    c48, h48 = stats(entries_48h)
-    c7, h7 = stats(entries_7d)
-    c30, h30 = stats(entries_30d)
-
-    # Category breakdown for 7d
-    cat_hours: Dict[str, float] = {}
-    for e in entries_7d:
-        cat = e.get("activity_type", "Other") or "Other"
-        cat_hours[cat] = cat_hours.get(cat, 0) + e.get("duration_hrs", 0)
-    sorted_cats = sorted(cat_hours.items(), key=lambda x: -x[1])
+    # Use stats from service
+    c48, h48 = stats["count_48h"], stats["total_48h"]
+    c7, h7 = stats["count_7d"], stats["total_7d"]
+    c30, h30 = stats["count_30d"], stats["total_30d"]
+    sorted_cats = stats["category_breakdown"]
 
     # ── Insights & Predictions ──
     patterns = analyze_patterns(all_entries)
@@ -136,12 +125,15 @@ async def show_activity_dashboard(update: Update, context: ContextTypes.DEFAULT_
     # Store entries in context for CRUD operations
     context.user_data["view_entries"] = {e["page_id"]: e for e in entries_48h}
 
+    # Detect gaps using service
+    detected_gaps = get_gaps(entries_48h, threshold_minutes=30, window_end=now)
+
     # Build entry labels and gap buttons
     entry_ids = []
     entry_labels = []
     gap_btns = []
 
-    for i, e in enumerate(entries_48h):
+    for e in entries_48h:
         start = e.get("start")
         end = e.get("end")
         title_full = e.get("title", "") or e.get("activity_type", "")
@@ -161,33 +153,15 @@ async def show_activity_dashboard(update: Update, context: ContextTypes.DEFAULT_
         entry_ids.append(page_id)
         entry_labels.append(label)
 
-        # Gap after this entry
-        if i < len(entries_48h) - 1:
-            next_start = entries_48h[i + 1].get("start")
-            if end and next_start:
-                gap_hrs = (next_start - end).total_seconds() / 3600
-                if gap_hrs >= 0.5:
-                    gap_start_str = _fmt_time_with_date(end, now)
-                    gap_end_str = _fmt_time_with_date(next_start, now)
-                    gap_btns.append({
-                        "start_hhmm": end.strftime("%Y%m%dT%H%M"),
-                        "end_hhmm": next_start.strftime("%Y%m%dT%H%M"),
-                        "label": f"Fill gap: {gap_start_str}-{gap_end_str} ({fmt_dur(gap_hrs)})",
-                    })
-
-    # Gap from last entry to now
-    if entries_48h:
-        last_end = entries_48h[-1].get("end")
-        if last_end and last_end < now:
-            gap_to_now = (now - last_end).total_seconds() / 3600
-            if gap_to_now >= 0.5:
-                gap_start_str = _fmt_time_with_date(last_end, now)
-                gap_end_str = _fmt_time_with_date(now, now)
-                gap_btns.append({
-                    "start_hhmm": last_end.strftime("%Y%m%dT%H%M"),
-                    "end_hhmm": now.strftime("%Y%m%dT%H%M"),
-                    "label": f"Fill gap: {gap_start_str}-{gap_end_str} ({fmt_dur(gap_to_now)})",
-                })
+    # Build gap buttons from detected gaps
+    for g in detected_gaps:
+        gap_start_str = _fmt_time_with_date(g["start"], now)
+        gap_end_str = _fmt_time_with_date(g["end"], now)
+        gap_btns.append({
+            "start_hhmm": g["start"].strftime("%Y%m%dT%H%M"),
+            "end_hhmm": g["end"].strftime("%Y%m%dT%H%M"),
+            "label": f"Fill gap: {gap_start_str}-{gap_end_str} ({fmt_dur(g['hours'])})",
+        })
 
     # Build keyboard with entries + gaps
     if entry_ids:
@@ -225,47 +199,25 @@ async def start_activity_flow(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data.pop("act_end", None)
 
     # Pre-fetch activity types for later
-    types = await notion_manager.get_activity_types()
-    context.user_data["activity_types"] = [t["name"] for t in types] if types else [
-        "Work", "Workout", "Shadow Work", "Trading", "Networking",
-        "Meeting", "Meditation", "Brain Games", "Sleep", "Chores",
-        "Recreation", "Study", "Socialize", "Content Creation",
-    ]
+    context.user_data["activity_types"] = await get_activity_types()
 
     return await _show_start_time_picker(update, context)
 
 
 async def type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """After type selected, ask description (or skip to notes for no-desc types)."""
+    """After type selected, always prompt for description (with Skip option)."""
     query = update.callback_query
     await query.answer()
     logger.info(f"[TYPE_CHOSEN] Callback data: {query.data}")
     atype = query.data.split(":", 1)[1]
     context.user_data["act_type"] = atype
 
-    # Fast-add: times already pre-filled, go straight to desc or save
+    # Fast-add: times already pre-filled, pop flag and show desc prompt
     if context.user_data.get("fast_add"):
         context.user_data.pop("fast_add", None)
-        if atype in NO_DESC_TYPES:
-            context.user_data["act_desc"] = ""
-            return await _save_activity(update, context)
-        await query.edit_message_text(
-            f"Type: <b>{escape(atype)}</b>\nEnter description:",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton(text="Skip", callback_data="act_desc:skip")],
-                [InlineKeyboardButton(text="Back to Activity", callback_data="act_back_dash")],
-            ]),
-            parse_mode="HTML",
-        )
-        return ENTER_DESC
-
-    # No-desc types skip description and go straight to notes
-    if atype in NO_DESC_TYPES:
-        context.user_data["act_desc"] = ""
-        return await _save_activity(update, context)
 
     await query.edit_message_text(
-        f"Type: <b>{escape(atype)}</b>\nEnter description:",
+        f"Type: <b>{escape(atype)}</b>\nEnter description (or skip):",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton(text="Skip", callback_data="act_desc:skip")],
             [InlineKeyboardButton(text="Back to Activity", callback_data="act_back_dash")],
@@ -278,8 +230,6 @@ async def type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
 async def desc_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """After description entered, save the activity."""
     context.user_data["act_desc"] = update.message.text.strip()
-    if context.user_data.get("fast_add"):
-        context.user_data.pop("fast_add", None)
     return await _save_activity(update, context)
 
 
@@ -288,16 +238,12 @@ async def desc_skipped(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     query = update.callback_query
     await query.answer()
     context.user_data["act_desc"] = ""
-    if context.user_data.get("fast_add"):
-        context.user_data.pop("fast_add", None)
     return await _save_activity(update, context)
 
 
 def _fmt_time_with_date(dt: datetime, reference: datetime) -> str:
     """Format time, showing date if different from reference."""
-    if dt.date() == reference.date():
-        return fmt_time(dt)
-    return f"{dt.strftime('%b %d')} {fmt_time(dt)}"
+    return fmt_time_with_date(dt, reference)
 
 
 def _compute_time_suggestions(entries_48h: List[dict], now: datetime, last_saved_end: Optional[datetime] = None) -> List[dict]:
@@ -391,7 +337,7 @@ async def _show_start_time_picker(update: Update, context: ContextTypes.DEFAULT_
     h48_start = (now - timedelta(hours=48)).date()
     h48_start_dt = datetime.combine(h48_start, datetime.min.time(), tzinfo=TZ)
     tomorrow = datetime.combine(date.today() + timedelta(days=1), datetime.min.time(), tzinfo=TZ)
-    entries_48h = await notion_manager.query_activity_entries(
+    entries_48h = await get_activity_entries(
         h48_start_dt.date().isoformat(), tomorrow.date().isoformat()
     )
     entries_48h.sort(key=lambda e: e.get("start", datetime.min))
@@ -454,10 +400,7 @@ async def _show_start_time_picker(update: Update, context: ContextTypes.DEFAULT_
     return CHOOSE_START
 
 
-def _parse_compact_dt(compact: str) -> datetime:
-    """Parses compact ISO datetime (YYYYMMDDTHHMM) back to datetime with TZ."""
-    dt = datetime.strptime(compact, "%Y%m%dT%H%M")
-    return dt.replace(tzinfo=TZ)
+_parse_compact_dt = parse_compact_dt
 
 
 async def start_suggestion_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -735,75 +678,52 @@ async def _save_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         status_msg = await update.message.reply_text("Saving...")
 
-    properties = {
-        "Name": NB.title(title),
-        "Date": NB.date(start_dt.isoformat(), end_iso=end_dt.isoformat()),
-    }
+    result = await save_activity_entry(
+        activity_type=atype,
+        start=start_dt,
+        end=end_dt,
+        notes=desc or None,
+    )
 
-    try:
-        result = await notion_manager.create_page(settings.DATABASE_ID_ACTIVITY_LOG, properties)
-        new_page_id = result.get("id", "")
+    if result["success"]:
+        new_page_id = result["page_id"]
         dur_hrs = (end_dt - start_dt).total_seconds() / 3600
-        logger.info(f"Activity saved successfully: {title} (page_id={new_page_id})")
+        fresh_entries = result["all_entries"]
+        surrounding_entries = result["surrounding_entries"]
+        window_start = result["window_start"]
+        window_end = result["window_end"]
 
         # Store last saved end for continuous logging
         context.user_data["last_saved_end"] = end_dt
 
-        # Re-render rolling view centered on the entry's date (not "now")
-        # This ensures the entry appears even if it's for a previous day
-        now = datetime.now(TZ)
-        entry_date = start_dt.date()
-        window_start = datetime.combine(entry_date - timedelta(days=1), datetime.min.time(), tzinfo=TZ)
-        window_end = datetime.combine(entry_date + timedelta(days=2), datetime.min.time(), tzinfo=TZ)
-        start_str = window_start.date().isoformat()
-        end_str = window_end.date().isoformat()
-        fresh_entries = await notion_manager.query_activity_entries(start_str, end_str, sort_ascending=False)
-        fresh_entries = [e for e in fresh_entries if e.get("start") and e["start"] >= window_start and e["start"] < window_end]
-        fresh_entries.sort(key=lambda e: e.get("start", datetime.min))
-
-        # Find the saved entry by page_id
-        saved_idx = None
-        for i, e in enumerate(fresh_entries):
-            if new_page_id and e.get("page_id") == new_page_id:
-                saved_idx = i
-                break
-        if saved_idx is None:
-            logger.warning(f"Could not find saved entry (page_id={new_page_id}, start={start_dt}) among {len(fresh_entries)} entries")
-
+        # Store entries in context
         context.user_data["view_entries"] = {e["page_id"]: e for e in fresh_entries}
 
-        if saved_idx is not None:
-            show_start = max(0, saved_idx - 10)
-            show_end = min(len(fresh_entries), saved_idx + 11)
-            display_entries = fresh_entries[show_start:show_end]
-        else:
-            display_entries = fresh_entries[-21:]  # Last 21 entries as fallback
-
         # Build the view with entries around the saved entry
-        view_text = render_rolling_view(display_entries, window_start, window_end, [])
+        view_text = render_rolling_view(surrounding_entries, window_start, window_end, [])
         if len(view_text) > 3500:
             view_text = view_text[:3500] + "\n..."
 
         # Success banner with date context
+        now = datetime.now(TZ)
         s_date_str = _fmt_time_with_date(start_dt, now)
         e_date_str = _fmt_time_with_date(end_dt, now)
         banner = f"{bold('Logged:')} {escape(title)} — {s_date_str}-{e_date_str} ({fmt_dur(dur_hrs)})"
 
         # Build keyboard: entry buttons around saved entry + continue button
         keyboard_rows = []
-        for entry in display_entries[-5:]:
-            s = entry.get("start")
-            e = entry.get("end")
-            a = entry.get("activity_type", "")
-            title = entry.get("title", "")
-            d = entry.get("duration_hrs", 0)
-            pid = entry.get("page_id", "")
-            t = ""
+        for disp_entry in surrounding_entries[-5:]:
+            s = disp_entry.get("start")
+            e = disp_entry.get("end")
+            t = disp_entry.get("title", "")
+            d = disp_entry.get("duration_hrs", 0)
+            pid = disp_entry.get("page_id", "")
+            t_str = ""
             if s:
-                t = fmt_time(s)
+                t_str = fmt_time(s)
             if e:
-                t += f"-{fmt_time(e)}"
-            lbl = f"{t} {title} ({fmt_dur(d)})"
+                t_str += f"-{fmt_time(e)}"
+            lbl = f"{t_str} {t} ({fmt_dur(d)})"
             if len(lbl) > 50:
                 lbl = lbl[:47] + "..."
             keyboard_rows.append([InlineKeyboardButton(text=lbl, callback_data=f"act_entry:{pid[:36]}")])
@@ -816,9 +736,9 @@ async def _save_activity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         text = f"{banner}\n\n{view_text}"
         keyboard = InlineKeyboardMarkup(keyboard_rows)
 
-    except Exception as e:
-        logger.error(f"Failed to save activity: {e}", exc_info=True)
-        text = f"Error saving entry: {escape(str(e))}"
+    else:
+        logger.error(f"Failed to save activity: {result['error']}")
+        text = f"Error saving entry: {escape(result['error'])}"
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton(text="Try Again", callback_data="menu:activity")],
             [InlineKeyboardButton(text="Back to Activity", callback_data="sub:activity")],
@@ -845,11 +765,11 @@ async def daily_view_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     date_str = query.data.split(":", 1)[1]
     if date_str == "today":
         # Rolling 24h: now - 24h to now
-        now = datetime.now(TZ)
+        now = round_to_15(datetime.now(TZ))
         window_end = now
         window_start = now - timedelta(hours=24)
     elif date_str == "yesterday":
-        now = datetime.now(TZ)
+        now = round_to_15(datetime.now(TZ))
         window_end = now - timedelta(hours=24)
         window_start = now - timedelta(hours=48)
     else:
@@ -870,7 +790,7 @@ async def daily_view_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def _render_daily_view(update: Update, context: ContextTypes.DEFAULT_TYPE, window_start: datetime, window_end: datetime) -> None:
     start_str = window_start.date().isoformat()
     end_str = (window_end.date() + timedelta(days=1)).isoformat()
-    entries = await notion_manager.query_activity_entries(start_str, end_str)
+    entries = await get_activity_entries(start_str, end_str)
 
     # Filter to window
     entries = [e for e in entries if e.get("start") and e["start"] >= window_start and e["start"] < window_end]
@@ -995,17 +915,9 @@ async def show_entry_detail(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     # Fallback: fetch from Notion if not in cache
     if not entry:
         logger.info(f"Entry {page_id} not in view_entries cache, fetching from Notion...")
-        try:
-            now = datetime.now(TZ)
-            month_ago = (now - timedelta(days=30)).isoformat()
-            tomorrow = (now + timedelta(days=1)).isoformat()
-            all_entries = await notion_manager.query_activity_entries(month_ago, tomorrow, sort_ascending=False)
-            for e in all_entries:
-                if e.get("page_id") == page_id:
-                    entry = e
-                    break
-        except Exception as e:
-            logger.error(f"Failed to fetch entry from Notion: {e}")
+        detail_result = await get_entry_detail(page_id)
+        if detail_result["found"]:
+            entry = detail_result["entry"]
 
     if not entry:
         await query.edit_message_text("Entry not found.", reply_markup=build_back_button("act_view:today"))
@@ -1050,7 +962,7 @@ async def undo_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             window_end = now
             start_str = window_start.date().isoformat()
             end_str = (window_end.date() + timedelta(days=1)).isoformat()
-            fresh = await notion_manager.query_activity_entries(start_str, end_str, sort_ascending=False)
+            fresh = await get_activity_entries(start_str, end_str, sort_ascending=False)
             fresh = [e for e in fresh if e.get("start") and e["start"] >= window_start and e["start"] < window_end]
             fresh.sort(key=lambda e: e.get("start", datetime.min))
             context.user_data["view_entries"] = {e["page_id"]: e for e in fresh}
@@ -1099,17 +1011,12 @@ async def edit_type_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     page_id = query.data.split(":", 1)[1]
     context.user_data["edit_page_id"] = page_id
 
-    types = await notion_manager.get_activity_types()
-    type_names = [t["name"] for t in types] if types else [
-        "Work", "Workout", "Shadow Work", "Trading", "Networking",
-        "Meeting", "Meditation", "Brain Games", "Sleep", "Chores",
-        "Recreation", "Study", "Socialize", "Content Creation",
-    ]
+    type_names = await get_activity_types()
     keyboard = build_grid_keyboard(type_names, "edt_type_val", row_width=2)
-    keyboard.inline_keyboard.append([
-        InlineKeyboardButton(text="Back to Entry", callback_data=f"act_entry:{page_id[:36]}"),
-    ])
-    await query.edit_message_text("Select new activity type:", reply_markup=keyboard)
+    rows = list(keyboard.inline_keyboard) + [
+        [InlineKeyboardButton(text="Back to Entry", callback_data=f"act_entry:{page_id[:36]}")],
+    ]
+    await query.edit_message_text("Select new activity type:", reply_markup=InlineKeyboardMarkup(rows))
     return EDT_CHOOSE_TYPE
 
 
@@ -1123,27 +1030,23 @@ async def edit_type_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     old_title = entry.get("title", "")
     parts = old_title.split(" - ", 1)
     desc = parts[1] if len(parts) > 1 else ""
-    new_title = f"{new_type} - {desc}" if desc else new_type
-
     context.user_data["undo_state"] = {
         "action": "edit_type",
         "page_id": page_id,
         "old_properties": {"Name": NB.title(old_title)},
     }
 
-    try:
-        await notion_manager.update_page(page_id, {"Name": NB.title(new_title)})
-        # Update the entry in context
-        entry["title"] = new_title
+    result = await update_entry_type(page_id, new_type, notes=desc or None)
+    if result["success"]:
+        entry["title"] = result["new_title"]
         entry["activity_type"] = new_type
         context.user_data["edit_entry"] = entry
-        # Re-render entry detail with undo
         text = render_entry_detail(entry)
         keyboard = build_entry_detail_keyboard(page_id)
         keyboard = _with_undo_button(keyboard, "Undo type change")
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
-    except Exception as e:
-        await query.edit_message_text(f"Error: {escape(str(e))}", reply_markup=build_back_button("act_entry:" + page_id[:36]), parse_mode="HTML")
+    else:
+        await query.edit_message_text(f"Error: {escape(result['error'])}", reply_markup=build_back_button("act_entry:" + page_id[:36]), parse_mode="HTML")
     return ConversationHandler.END
 
 
@@ -1171,8 +1074,6 @@ async def edit_desc_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     atype = entry.get("activity_type", "Other")
     old_title = entry.get("title", "")
 
-    new_title = f"{atype} - {new_desc}" if new_desc else atype
-
     # Store undo state
     context.user_data["undo_state"] = {
         "action": "edit_desc",
@@ -1181,16 +1082,16 @@ async def edit_desc_entered(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     }
 
     status_msg = await update.message.reply_text("Updating...")
-    try:
-        await notion_manager.update_page(page_id, {"Name": NB.title(new_title)})
-        entry["title"] = new_title
+    result = await update_entry_type(page_id, atype, notes=new_desc or None)
+    if result["success"]:
+        entry["title"] = result["new_title"]
         context.user_data["edit_entry"] = entry
         text = render_entry_detail(entry)
         keyboard = build_entry_detail_keyboard(page_id)
         keyboard = _with_undo_button(keyboard, "Undo desc change")
         await status_msg.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
-    except Exception as e:
-        await status_msg.edit_text(f"Error: {escape(str(e))}", reply_markup=build_back_button("act_entry:" + page_id[:36]), parse_mode="HTML")
+    else:
+        await status_msg.edit_text(f"Error: {escape(result['error'])}", reply_markup=build_back_button("act_entry:" + page_id[:36]), parse_mode="HTML")
     return ConversationHandler.END
 
 
@@ -1204,13 +1105,22 @@ async def edit_time_start(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     entry = context.user_data.get("edit_entry", {})
     start = entry.get("start")
+    end = entry.get("end")
+    title = entry.get("title", "")
     context.user_data["pick_date"] = (start.date().isoformat() if start else date.today().isoformat())
 
+    lines = [bold("Edit Times"), f"{escape(title)}"]
+    if start and end:
+        lines.append(f"<code>{fmt_time_range(start, end)}</code>")
+    lines.append("")
+    lines.append("Tap an offset to adjust:")
+
     await query.edit_message_text(
-        "Select new START hour:",
-        reply_markup=build_hour_keyboard("edt_sh", back_callback="act_view:today"),
+        "\n".join(lines),
+        reply_markup=build_edit_time_offset_keyboard(page_id),
+        parse_mode="HTML",
     )
-    return EDT_CHOOSE_START
+    return EDT_SHOW_OFFSETS
 
 
 async def edit_start_hour_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1275,27 +1185,25 @@ async def edit_end_minute_chosen(update: Update, context: ContextTypes.DEFAULT_T
     old_start = entry.get("start")
     old_end = entry.get("end")
 
-    if old_start and old_end:
-        context.user_data["undo_state"] = {
-            "action": "edit_times",
-            "page_id": page_id,
-            "old_properties": {"Date": NB.date(old_start.isoformat(), end_iso=old_end.isoformat())},
-        }
-
-    try:
-        await notion_manager.update_page(page_id, {
-            "Date": NB.date(new_start.isoformat(), end_iso=new_end.isoformat()),
-        })
+    result = await update_entry_time(page_id, new_start, new_end)
+    if result["success"]:
+        # Store undo state before updating entry in context
+        if old_start and old_end:
+            context.user_data["undo_state"] = {
+                "action": "edit_times",
+                "page_id": page_id,
+                "old_properties": {"Date": NB.date(old_start.isoformat(), end_iso=old_end.isoformat())},
+            }
         entry["start"] = new_start
         entry["end"] = new_end
-        entry["duration_hrs"] = (new_end - new_start).total_seconds() / 3600
+        entry["duration_hrs"] = result["new_duration_hrs"]
         context.user_data["edit_entry"] = entry
         text = render_entry_detail(entry)
         keyboard = build_entry_detail_keyboard(page_id)
         keyboard = _with_undo_button(keyboard, "Undo time change")
         await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
-    except Exception as e:
-        await query.edit_message_text(f"Error: {escape(str(e))}", reply_markup=build_back_button("act_entry:" + page_id[:36]), parse_mode="HTML")
+    else:
+        await query.edit_message_text(f"Error: {escape(result['error'])}", reply_markup=build_back_button("act_entry:" + page_id[:36]), parse_mode="HTML")
     return ConversationHandler.END
 
 
@@ -1303,6 +1211,89 @@ async def edit_end_minute_back(update: Update, context: ContextTypes.DEFAULT_TYP
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Select new END hour:", reply_markup=build_hour_keyboard("edt_eh", back_callback="act_view:today"))
+    return EDT_CHOOSE_END
+
+
+# ── Time Offset Shortcuts ─────────────────────────────────────────────────────
+
+async def edit_offset_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """
+    Apply a time offset to start or end and save immediately.
+    Callback data: edt_offset:{target}:{sign}{minutes}
+    e.g. edt_offset:start:+30, edt_offset:end:-45
+    """
+    query = update.callback_query
+    await query.answer()
+    _, target, offset_str = query.data.split(":")
+    sign = 1 if offset_str[0] == "+" else -1
+    minutes = int(offset_str[1:]) * sign
+
+    entry = context.user_data.get("edit_entry", {})
+    page_id = context.user_data.get("edit_page_id", "")
+
+    current_start = entry.get("start")
+    current_end = entry.get("end")
+    if not current_start or not current_end:
+        await query.edit_message_text("Error: entry times not found.", reply_markup=build_back_button(f"act_entry:{page_id[:36]}"))
+        return ConversationHandler.END
+
+    td = timedelta(minutes=minutes)
+    if target == "start":
+        new_start = round_to_15(current_start + td)
+        new_end = current_end
+    else:
+        new_start = current_start
+        new_end = round_to_15(current_end + td)
+
+    if new_start >= new_end:
+        await query.answer("Invalid: start would be after end!", show_alert=True)
+        return EDT_SHOW_OFFSETS
+
+    result = await update_entry_time(page_id, new_start, new_end)
+    if result["success"]:
+        # Store undo state
+        context.user_data["undo_state"] = {
+            "action": "edit_times",
+            "page_id": page_id,
+            "old_properties": {"Date": NB.date(current_start.isoformat(), end_iso=current_end.isoformat())},
+        }
+        entry["start"] = new_start
+        entry["end"] = new_end
+        entry["duration_hrs"] = result["new_duration_hrs"]
+        context.user_data["edit_entry"] = entry
+
+        text = render_entry_detail(entry)
+        keyboard = _with_undo_button(build_entry_detail_keyboard(page_id), "Undo time change")
+        await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+    else:
+        await query.edit_message_text(f"Error: {escape(result['error'])}", reply_markup=build_back_button(f"act_entry:{page_id[:36]}"), parse_mode="HTML")
+
+    return ConversationHandler.END
+
+
+async def edit_start_custom(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Transition from offset screen to custom start hour picker."""
+    query = update.callback_query
+    await query.answer()
+    await query.edit_message_text(
+        "Select new START hour:",
+        reply_markup=build_hour_keyboard("edt_sh", back_callback="act_view:today"),
+    )
+    return EDT_CHOOSE_START
+
+
+async def edit_end_custom(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Transition from offset screen to custom end hour picker."""
+    query = update.callback_query
+    await query.answer()
+    entry = context.user_data.get("edit_entry", {})
+    current_start = entry.get("start")
+    if current_start:
+        context.user_data["pick_date_end"] = current_start.date().isoformat()
+    await query.edit_message_text(
+        "Select new END hour:",
+        reply_markup=build_hour_keyboard("edt_eh", back_callback="act_view:today"),
+    )
     return EDT_CHOOSE_END
 
 
@@ -1322,49 +1313,49 @@ async def delete_entry_confirm(update: Update, context: ContextTypes.DEFAULT_TYP
         "page_id": page_id,
     }
 
-    try:
-        await notion_manager.delete_page(page_id)
+    result = await delete_entry(page_id)
+    if not result["success"]:
+        logger.error(f"Delete failed: {result['error']}")
+        await query.edit_message_text(f"Error: {escape(result['error'])}", reply_markup=build_back_button("act_entry:" + page_id[:36]), parse_mode="HTML")
+        return
 
-        # Re-render rolling view with fresh data
-        now = datetime.now(TZ)
-        window_start = now - timedelta(hours=24)
-        window_end = now
-        start_str = window_start.date().isoformat()
-        end_str = (window_end.date() + timedelta(days=1)).isoformat()
-        fresh_entries = await notion_manager.query_activity_entries(start_str, end_str, sort_ascending=False)
-        fresh_entries = [e for e in fresh_entries if e.get("start") and e["start"] >= window_start and e["start"] < window_end]
-        fresh_entries.sort(key=lambda e: e.get("start", datetime.min))
-        context.user_data["view_entries"] = {e["page_id"]: e for e in fresh_entries}
+    # Re-render rolling view with fresh data
+    now = datetime.now(TZ)
+    window_start = now - timedelta(hours=24)
+    window_end = now
+    start_str = window_start.date().isoformat()
+    end_str = (window_end.date() + timedelta(days=1)).isoformat()
+    fresh_entries = await get_activity_entries(start_str, end_str, sort_ascending=False)
+    fresh_entries = [e for e in fresh_entries if e.get("start") and e["start"] >= window_start and e["start"] < window_end]
+    fresh_entries.sort(key=lambda e: e.get("start", datetime.min))
+    context.user_data["view_entries"] = {e["page_id"]: e for e in fresh_entries}
 
-        text = render_rolling_view(fresh_entries, window_start, window_end, [])
-        if len(text) > 3800:
-            text = text[:3800] + "\n..."
+    text = render_rolling_view(fresh_entries, window_start, window_end, [])
+    if len(text) > 3800:
+        text = text[:3800] + "\n..."
 
-        # Add undo banner
-        undo_text = f"\n\n{bold('Deleted:')} {escape(title)}  "
-        keyboard_rows = [
-            [InlineKeyboardButton(text="Undo delete", callback_data="undo_action")],
-        ]
-        # Add gap buttons
-        for i in range(len(fresh_entries) - 1):
-            end = fresh_entries[i].get("end")
-            next_start = fresh_entries[i + 1].get("start")
-            if end and next_start:
-                gap_hrs = (next_start - end).total_seconds() / 3600
-                if gap_hrs >= 0.5:
-                    keyboard_rows.append([InlineKeyboardButton(
-                        text=f"Fill gap: {fmt_time(end)}-{fmt_time(next_start)} ({fmt_dur(gap_hrs)})",
-                        callback_data=f"act_gap:{end.strftime('%Y%m%dT%H%M')}-{next_start.strftime('%Y%m%dT%H%M')}",
-                    )])
-        keyboard_rows.append([
-            InlineKeyboardButton(text="+ New Entry", callback_data="menu:activity"),
-            InlineKeyboardButton(text="Back", callback_data="sub:activity"),
-        ])
+    # Add undo banner
+    undo_text = f"\n\n{bold('Deleted:')} {escape(title)}  "
+    keyboard_rows = [
+        [InlineKeyboardButton(text="Undo delete", callback_data="undo_action")],
+    ]
+    # Add gap buttons
+    for i in range(len(fresh_entries) - 1):
+        end = fresh_entries[i].get("end")
+        next_start = fresh_entries[i + 1].get("start")
+        if end and next_start:
+            gap_hrs = (next_start - end).total_seconds() / 3600
+            if gap_hrs >= 0.5:
+                keyboard_rows.append([InlineKeyboardButton(
+                    text=f"Fill gap: {fmt_time(end)}-{fmt_time(next_start)} ({fmt_dur(gap_hrs)})",
+                    callback_data=f"act_gap:{end.strftime('%Y%m%dT%H%M')}-{next_start.strftime('%Y%m%dT%H%M')}",
+                )])
+    keyboard_rows.append([
+        InlineKeyboardButton(text="+ New Entry", callback_data="menu:activity"),
+        InlineKeyboardButton(text="Back", callback_data="sub:activity"),
+    ])
 
-        await query.edit_message_text(text + undo_text, reply_markup=InlineKeyboardMarkup(keyboard_rows), parse_mode="HTML")
-    except Exception as e:
-        logger.error(f"Delete failed: {e}", exc_info=True)
-        await query.edit_message_text(f"Error: {escape(str(e))}", reply_markup=build_back_button("act_entry:" + page_id[:36]), parse_mode="HTML")
+    await query.edit_message_text(text + undo_text, reply_markup=InlineKeyboardMarkup(keyboard_rows), parse_mode="HTML")
 
 
 # ── Adjacent Entry Flow ──────────────────────────────────────────────────────
@@ -1391,18 +1382,13 @@ async def add_adjacent_before(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["pick_date"] = ref_start.date().isoformat()
 
     # Pre-fetch activity types
-    types = await notion_manager.get_activity_types()
-    context.user_data["activity_types"] = [t["name"] for t in types] if types else [
-        "Work", "Workout", "Shadow Work", "Trading", "Networking",
-        "Meeting", "Meditation", "Brain Games", "Sleep", "Chores",
-        "Recreation", "Study", "Socialize", "Content Creation",
-    ]
+    context.user_data["activity_types"] = await get_activity_types()
 
     # Fetch 48h entries for context
     now = datetime.now(TZ)
     h48_start = (now - timedelta(hours=48)).date()
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
-    entries_48h = await notion_manager.query_activity_entries(
+    entries_48h = await get_activity_entries(
         h48_start.isoformat(), tomorrow
     )
     entries_48h.sort(key=lambda e: e.get("start", datetime.min))
@@ -1468,18 +1454,13 @@ async def add_adjacent_after(update: Update, context: ContextTypes.DEFAULT_TYPE)
     context.user_data["pick_date"] = ref_end.date().isoformat()
 
     # Pre-fetch activity types
-    types = await notion_manager.get_activity_types()
-    context.user_data["activity_types"] = [t["name"] for t in types] if types else [
-        "Work", "Workout", "Shadow Work", "Trading", "Networking",
-        "Meeting", "Meditation", "Brain Games", "Sleep", "Chores",
-        "Recreation", "Study", "Socialize", "Content Creation",
-    ]
+    context.user_data["activity_types"] = await get_activity_types()
 
     # Fetch 48h entries for context
     now = datetime.now(TZ)
     h48_start = (now - timedelta(hours=48)).date()
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
-    entries_48h = await notion_manager.query_activity_entries(
+    entries_48h = await get_activity_entries(
         h48_start.isoformat(), tomorrow
     )
     entries_48h.sort(key=lambda e: e.get("start", datetime.min))
@@ -1559,13 +1540,7 @@ async def fast_add_from_gap(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     context.user_data["act_end"] = end_dt
 
     # Fetch activity types
-    types = await notion_manager.get_activity_types()
-    type_names = [t["name"] for t in types] if types else [
-        "Work", "Workout", "Shadow Work", "Trading", "Networking",
-        "Meeting", "Meditation", "Brain Games", "Sleep", "Chores",
-        "Recreation", "Study", "Socialize", "Content Creation",
-    ]
-    context.user_data["activity_types"] = type_names
+    context.user_data["activity_types"] = await get_activity_types()
 
     dur_hrs = (end_dt - start_dt).total_seconds() / 3600
 
@@ -1573,7 +1548,7 @@ async def fast_add_from_gap(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     entry_date = start_dt.date()
     today_start = datetime.combine(entry_date, datetime.min.time(), tzinfo=TZ)
     today_end = datetime.combine(entry_date + timedelta(days=1), datetime.min.time(), tzinfo=TZ)
-    today_entries = await notion_manager.query_activity_entries(
+    today_entries = await get_activity_entries(
         today_start.date().isoformat(), today_end.date().isoformat()
     )
     context.user_data["recent_entries"] = today_entries
@@ -1585,9 +1560,9 @@ async def fast_add_from_gap(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         f"Fill gap: <code>{fmt_time(start_dt)} - {fmt_time(end_dt)}</code> ({fmt_dur(dur_hrs)})\n\n"
         f"Select activity type:"
     )
-    keyboard = build_grid_keyboard(type_names, "act_type", row_width=2)
-    keyboard.inline_keyboard.append([InlineKeyboardButton(text="Back to Activity", callback_data="act_back_dash")])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+    keyboard = build_grid_keyboard(context.user_data["activity_types"], "act_type", row_width=2)
+    rows = list(keyboard.inline_keyboard) + [[InlineKeyboardButton(text="Back to Activity", callback_data="act_back_dash")]]
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(rows), parse_mode="HTML")
 
     # Set a flag so we skip start/end time pickers and go straight to notes
     context.user_data["fast_add"] = True
@@ -1597,39 +1572,125 @@ async def fast_add_from_gap(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 # ── Gap Report ───────────────────────────────────────────────────────────────
 
 async def show_gaps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows full week timeline with gaps highlighted inline, gap fill buttons, and week navigation."""
     query = update.callback_query
     await query.answer()
     await query.edit_message_text("Checking gaps...")
 
-    today = date.today()
-    week_ago = (today - timedelta(days=7)).isoformat()
-    tomorrow = (today + timedelta(days=1)).isoformat()
-    entries = await notion_manager.query_activity_entries(week_ago, tomorrow)
+    # Parse callback data to determine week range
+    data = query.data
+    now_rounded = round_to_15(datetime.now(TZ))
+
+    if data.startswith("act_gaps:week:"):
+        week_start_str = data.split(":", 2)[2]
+        current_week_start = datetime.strptime(week_start_str, "%Y-%m-%d").date()
+        range_start = datetime.combine(current_week_start, time.min, tzinfo=TZ)
+        range_end = min(range_start + timedelta(days=7), now_rounded)
+    else:
+        # Default: rolling 7-day window from now (no future dates)
+        range_end = now_rounded
+        range_start = range_end - timedelta(days=7)
+        current_week_start = range_start.date()
+
+    raw_entries = await get_activity_entries(
+        range_start.isoformat(), range_end.isoformat(), local_dates=False
+    )
+
+    # Filter out entries with missing time data
+    entries = [e for e in raw_entries if e.get("start") and e.get("end")]
+    skipped = len(raw_entries) - len(entries)
 
     if len(entries) < 2:
         await query.edit_message_text("Not enough entries.", reply_markup=build_back_button("sub:activity"))
         return
 
-    gaps = []
+    # Sort chronologically (ascending)
+    entries.sort(key=lambda e: e.get("start", datetime.min))
+
+    # Build gaps for render_rolling_view + fill buttons
+    gaps_for_render = []
+    gap_buttons: List[List[InlineKeyboardButton]] = []
+
+    # Boundary-start gap (before first entry)
+    first_start = entries[0].get("start")
+    if first_start and first_start > range_start:
+        boundary_gap = (first_start - range_start).total_seconds() / 3600
+        if boundary_gap >= 4:
+            gaps_for_render.append({
+                "before_all": True,
+                "hours": boundary_gap,
+                "start": range_start.strftime("%b %d %H:%M"),
+                "end": first_start.strftime("%b %d %H:%M"),
+            })
+            gap_buttons.append([InlineKeyboardButton(
+                text=f"Fill: {range_start.strftime('%b %d %H:%M')} \u2192 {first_start.strftime('%b %d %H:%M')} ({fmt_dur(boundary_gap)})",
+                callback_data=f"act_gap:{range_start.strftime('%Y%m%dT%H%M')}-{first_start.strftime('%Y%m%dT%H%M')}"
+            )])
+
+    # Between-entry gaps
     for i in range(len(entries) - 1):
         curr_end = entries[i].get("end")
         next_start = entries[i + 1].get("start")
         if curr_end and next_start:
             gap_hrs = (next_start - curr_end).total_seconds() / 3600
             if gap_hrs >= 4:
-                gaps.append({
-                    "date": curr_end.strftime("%a %b %d"),
-                    "start": curr_end.strftime("%H:%M"),
-                    "end": next_start.strftime("%H:%M"),
+                gaps_for_render.append({
+                    "after_entry_id": entries[i].get("page_id"),
                     "hours": gap_hrs,
+                    "start": curr_end.strftime("%b %d %H:%M"),
+                    "end": next_start.strftime("%b %d %H:%M"),
                 })
+                gap_buttons.append([InlineKeyboardButton(
+                    text=f"Fill: {curr_end.strftime('%b %d %H:%M')} \u2192 {next_start.strftime('%b %d %H:%M')} ({fmt_dur(gap_hrs)})",
+                    callback_data=f"act_gap:{curr_end.strftime('%Y%m%dT%H%M')}-{next_start.strftime('%Y%m%dT%H%M')}"
+                )])
 
-    text = render_gap_report(gaps)
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(text="View Today", callback_data="act_view:today")],
-        [InlineKeyboardButton(text="Back", callback_data="sub:activity")],
+    # Boundary-end gap (after last entry)
+    last_end = entries[-1].get("end")
+    if last_end and last_end < range_end:
+        boundary_gap = (range_end - last_end).total_seconds() / 3600
+        if boundary_gap >= 4:
+            gaps_for_render.append({
+                "after_all": True,
+                "hours": boundary_gap,
+                "start": last_end.strftime("%b %d %H:%M"),
+                "end": range_end.strftime("%b %d %H:%M"),
+            })
+            gap_buttons.append([InlineKeyboardButton(
+                text=f"Fill: {last_end.strftime('%b %d %H:%M')} \u2192 {range_end.strftime('%b %d %H:%M')} ({fmt_dur(boundary_gap)})",
+                callback_data=f"act_gap:{last_end.strftime('%Y%m%dT%H%M')}-{range_end.strftime('%Y%m%dT%H%M')}"
+            )])
+
+    # Timeline text using render_rolling_view
+    text = render_rolling_view(entries, range_start, range_end, gaps_for_render)
+
+    # Truncate to stay under Telegram 4096 limit
+    if len(text) > 3500:
+        text = text[:3500] + "\n... (truncated)"
+
+    # Condensed gap summary
+    if gap_buttons:
+        text += "\n\n" + bold(f"Gaps Found — {len(gap_buttons)}")
+        for g in gaps_for_render:
+            text += f"\n  \u25E5 {fmt_dur(g['hours'])} ({g['start']} \u2192 {g['end']})"
+
+    if skipped:
+        text += f"\n\n<i>Note: {skipped} entry(s) had no time data and were excluded.</i>"
+
+    # Build keyboard: gap fill buttons + week navigation + back
+    prev_week = (current_week_start - timedelta(days=7)).isoformat()
+    next_week = (current_week_start + timedelta(days=7)).isoformat()
+
+    keyboard_rows: List[List[InlineKeyboardButton]] = []
+    keyboard_rows.extend(gap_buttons)
+    keyboard_rows.append([
+        InlineKeyboardButton(text="\u25C0 7d", callback_data=f"act_gaps:week:{prev_week}"),
+        InlineKeyboardButton(text="Today", callback_data="act_gaps:7d"),
+        InlineKeyboardButton(text="7d \u25B6", callback_data=f"act_gaps:week:{next_week}"),
     ])
-    await query.edit_message_text(text, reply_markup=keyboard, parse_mode="HTML")
+    keyboard_rows.append([InlineKeyboardButton(text="Back", callback_data="sub:activity")])
+
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard_rows), parse_mode="HTML")
 
 
 # ── Periodic Gap Alert Job ───────────────────────────────────────────────────
@@ -1640,14 +1701,31 @@ async def check_activity_gaps(context: ContextTypes.DEFAULT_TYPE) -> None:
     if await bot_cache.get("last_gap_alert"):
         return
 
-    today = date.today()
-    week_ago = (today - timedelta(days=7)).isoformat()
-    tomorrow = (today + timedelta(days=1)).isoformat()
-    entries = await notion_manager.query_activity_entries(week_ago, tomorrow)
+    now_rounded = round_to_15(datetime.now(TZ))
+    range_start = now_rounded - timedelta(days=7)
+    range_end = now_rounded
+    raw_entries = await get_activity_entries(
+        range_start.isoformat(), range_end.isoformat(), local_dates=False
+    )
+    entries = [e for e in raw_entries if e.get("start") and e.get("end")]
+    skipped = len(raw_entries) - len(entries)
+    if skipped:
+        logger.warning(f"Periodic gap check: {skipped}/{len(raw_entries)} entries have missing time data and were skipped")
     if len(entries) < 2:
         return
 
     gaps = []
+    gap_dates: set[date] = set()
+
+    # Gap from range start to first entry's start
+    first_start = entries[0].get("start")
+    if first_start and first_start > range_start:
+        boundary_gap = (first_start - range_start).total_seconds() / 3600
+        if boundary_gap >= 4:
+            gaps.append(f"  {range_start.strftime('%b %d %H:%M')} → {first_start.strftime('%b %d %H:%M')} ({fmt_dur(boundary_gap)})")
+            gap_dates.add(first_start.date())
+
+    # Gaps between consecutive entries
     for i in range(len(entries) - 1):
         curr_end = entries[i].get("end")
         next_start = entries[i + 1].get("start")
@@ -1655,6 +1733,15 @@ async def check_activity_gaps(context: ContextTypes.DEFAULT_TYPE) -> None:
             gap_hrs = (next_start - curr_end).total_seconds() / 3600
             if gap_hrs >= 4:
                 gaps.append(f"  {curr_end.strftime('%b %d')} {curr_end.strftime('%H:%M')}-{next_start.strftime('%H:%M')} ({fmt_dur(gap_hrs)})")
+                gap_dates.add(curr_end.date())
+
+    # Gap from last entry's end to range end
+    last_end = entries[-1].get("end")
+    if last_end and last_end < range_end:
+        boundary_gap = (range_end - last_end).total_seconds() / 3600
+        if boundary_gap >= 4:
+            gaps.append(f"  {last_end.strftime('%b %d %H:%M')} → {range_end.strftime('%b %d %H:%M')} ({fmt_dur(boundary_gap)})")
+            gap_dates.add(last_end.date())
 
     if not gaps:
         return
@@ -1662,9 +1749,18 @@ async def check_activity_gaps(context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = context.bot_data.get("user_chat_id")
     if chat_id:
         text = f"Gap Alert — {len(gaps)} gap(s) >= 4h:\n" + "\n".join(gaps[:10])
-        keyboard = InlineKeyboardMarkup([
-            [InlineKeyboardButton(text="View Today", callback_data="act_view:today")],
-        ])
+        # Build keyboard: one row of day-specific navigation buttons + full gap report
+        keyboard_rows = []
+        day_buttons = []
+        for gd in sorted(gap_dates):
+            day_buttons.append(InlineKeyboardButton(
+                text=gd.strftime("%a %b %d"),
+                callback_data=f"act_view:{gd.isoformat()}"
+            ))
+        if day_buttons:
+            keyboard_rows.append(day_buttons)
+        keyboard_rows.append([InlineKeyboardButton(text="📊 Full Gap Report", callback_data="act_gaps:7d")])
+        keyboard = InlineKeyboardMarkup(keyboard_rows)
         await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
 
     await bot_cache.set("last_gap_alert", True, expire=3600)
