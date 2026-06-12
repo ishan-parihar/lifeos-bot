@@ -156,8 +156,9 @@ def _toon_encode_inline(data: dict, indent: int = 0) -> str:
             lines.append(f"{pad}{key}:")
             for idx, btn in enumerate(value, start=1):
                 if isinstance(btn, dict):
-                    label = btn.get("label", "")
-                    cb = btn.get("callback_data", "")
+                    # Support both {"label": ..., "callback_data": ...} and {"text": ..., "action": ...}
+                    label = btn.get("label") or btn.get("text", "")
+                    cb = btn.get("callback_data") or btn.get("action", "")
                     safe_label = _toon_escape(label)
                     lines.append(f"{pad}  {idx}: {safe_label} -> {cb}")
                 else:
@@ -298,9 +299,15 @@ def _rich_encode(data: dict) -> str:
 
 
 def _text_encode(data: dict) -> str:
-    """Plain-text formatting — strips HTML, minimal structure."""
+    """Plain-text formatting — strips HTML, minimal structure.
+
+    Handles the standard screen keys (text, buttons, session, state,
+    success, error, data) plus arbitrary keys from service responses
+    (entries, gaps, count, category_breakdown, etc.).
+    """
     lines: List[str] = []
 
+    # ── Standard screen keys ──
     text = data.get("text", "")
     if text:
         lines.append(_strip_html(text))
@@ -344,9 +351,69 @@ def _text_encode(data: dict) -> str:
     if inner_data and isinstance(inner_data, dict):
         lines.append("")
         for k, v in inner_data.items():
-            lines.append(f"  {k}: {v}")
+            lines.append(f"  {k}: {_text_value(v)}")
+
+    # ── Arbitrary service keys (entries, gaps, count, etc.) ──
+    _SKIP = frozenset({
+        "text", "buttons", "session", "state", "timestamp",
+        "success", "error", "data",
+    })
+    for key, value in data.items():
+        if key in _SKIP:
+            continue
+        if value is None:
+            lines.append(f"{key}: null")
+        elif isinstance(value, (list, tuple)):
+            lines.append("")
+            lines.append(f"{key}:")
+            for idx, item in enumerate(value, start=1):
+                if isinstance(item, dict):
+                    lines.append(f"  {idx}. {_text_dict_summary(item)}")
+                else:
+                    lines.append(f"  {idx}. {_text_value(item)}")
+        elif isinstance(value, dict):
+            lines.append("")
+            lines.append(f"{key}:")
+            for dk, dv in value.items():
+                lines.append(f"  {dk}: {_text_value(dv)}")
+        else:
+            lines.append(f"{key}: {_text_value(value)}")
 
     return "\n".join(lines).strip()
+
+
+def _text_value(value: Any) -> str:
+    """Format a scalar value for text output."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return _strip_html(value)
+    return str(value)
+
+
+def _text_dict_summary(d: dict) -> str:
+    """Produce a one-line summary of a dict for list rendering."""
+    parts: List[str] = []
+    # Prefer title/name/id for human-readable summary
+    for preferred in ("title", "name", "label", "page_id", "id", "service"):
+        if preferred in d:
+            parts.append(f"{preferred}: {_text_value(d[preferred])}")
+            break
+    # Add key numeric or short fields
+    for k, v in d.items():
+        if k in ("title", "name", "label", "page_id", "id", "service"):
+            continue
+        if isinstance(v, (int, float)):
+            parts.append(f"{k}: {v}")
+        elif isinstance(v, str) and len(v) < 60:
+            parts.append(f"{k}: {v}")
+        elif isinstance(v, bool):
+            parts.append(f"{k}: {'yes' if v else 'no'}")
+        elif v is None:
+            parts.append(f"{k}: -")
+    return " | ".join(parts) if parts else str(d)[:120]
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

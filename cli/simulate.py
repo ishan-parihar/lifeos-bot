@@ -103,14 +103,22 @@ def _err_screen(sd: dict, msg: str) -> dict:
     }
 
 
+_persist_loop: asyncio.AbstractEventLoop | None = None
+
+
+def _get_loop() -> asyncio.AbstractEventLoop:
+    """Get or create a persistent event loop for the CLI session."""
+    global _persist_loop
+    if _persist_loop is None or _persist_loop.is_closed():
+        _persist_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_persist_loop)
+    return _persist_loop
+
+
 def _run_async(coro) -> Any:
-    """Run an async coroutine synchronously."""
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.close()
+    """Run an async coroutine synchronously on a persistent event loop."""
+    loop = _get_loop()
+    return loop.run_until_complete(coro)
 
 
 # ── Screen Builders ────────────────────────────────────────────────────────────
@@ -547,6 +555,116 @@ def _handle_back(sd, action, input_text=None):
     return _build_dashboard_screen(sd)
 
 
+# ── Edit Handlers ──────────────────────────────────────────────────────────────
+
+
+def _handle_edt_type(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    types = _run_async(get_activity_types())
+    sd["state"] = "picking_edit_type"
+    return _make_screen(sd, "Select new activity type:", [
+        {"text": t, "action": f"edt_type_pick:{page_id}:{t}"} for t in types
+    ] + [{"text": "Cancel", "action": f"act_entry:{page_id}"}])
+
+
+def _handle_edt_type_pick(sd, action, input_text=None):
+    parts = action.split(":", 2)
+    page_id = parts[1] if len(parts) > 1 else ""
+    new_type = parts[2] if len(parts) > 2 else ""
+    if not page_id or not new_type:
+        return _err_screen(sd, "Missing page_id or type")
+    result = _run_async(update_entry_type(page_id=page_id, new_type=new_type))
+    if result.get("success"):
+        return _build_entry_detail_screen(sd, page_id)
+    return _err_screen(sd, f"Failed to update type: {result.get('error', 'unknown')}")
+
+
+def _handle_edt_time(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    sd["state"] = "entering_edit_time"
+    return _make_screen(sd, "Enter new time range (e.g. 09:00-11:00):", [
+        {"text": "Cancel", "action": f"act_entry:{page_id}"},
+    ])
+
+
+def _handle_edt_time_pick(sd, action, input_text=None):
+    parts = action.split(":", 2)
+    page_id = parts[1] if len(parts) > 1 else ""
+    tval = parts[2] if len(parts) > 2 else (input_text or "")
+    if not page_id or not tval:
+        return _err_screen(sd, "Missing page_id or time")
+    now = datetime.now(TZ)
+    start, end = now, now + timedelta(hours=1)
+    try:
+        pts = tval.replace(":", "").split("-")
+        if len(pts) == 2:
+            sh, sm = int(pts[0][:2]), int(pts[0][2:4]) if len(pts[0]) > 2 else 0
+            eh, em = int(pts[1][:2]), int(pts[1][2:4]) if len(pts[1]) > 2 else 0
+            start = now.replace(hour=sh, minute=sm, second=0, microsecond=0)
+            end = now.replace(hour=eh, minute=em, second=0, microsecond=0)
+            if end <= start:
+                end = start + timedelta(hours=1)
+    except (ValueError, IndexError):
+        return _err_screen(sd, f"Invalid time format: {tval}")
+    result = _run_async(update_entry_time(page_id=page_id, start=start, end=end))
+    if result.get("success"):
+        return _build_entry_detail_screen(sd, page_id)
+    return _err_screen(sd, f"Failed to update time: {result.get('error', 'unknown')}")
+
+
+def _handle_edt_desc(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    sd["state"] = "entering_edit_desc"
+    return _make_screen(sd, "Enter new description (or /skip to clear):", [
+        {"text": "Skip", "action": f"edt_desc_enter:{page_id}:"},
+        {"text": "Cancel", "action": f"act_entry:{page_id}"},
+    ])
+
+
+def _handle_edt_desc_enter(sd, action, input_text=None):
+    parts = action.split(":", 2)
+    page_id = parts[1] if len(parts) > 1 else ""
+    desc = parts[2] if len(parts) > 2 else (input_text or "")
+    if not page_id:
+        return _err_screen(sd, "Missing page_id")
+    if desc == "skip":
+        desc = ""
+    detail = _run_async(get_entry_detail(page_id))
+    current_type = detail.get("entry", {}).get("activity_type", "Unknown") if detail.get("found") else "Unknown"
+    result = _run_async(update_entry_type(page_id=page_id, new_type=current_type, notes=desc))
+    if result.get("success"):
+        return _build_entry_detail_screen(sd, page_id)
+    return _err_screen(sd, f"Failed to update description: {result.get('error', 'unknown')}")
+
+
+def _handle_edt_del(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    sd["state"] = "confirming_delete"
+    return _make_screen(sd, "Delete this entry? This cannot be undone.", [
+        {"text": "Yes, Delete", "action": f"edt_del_confirm:{page_id}"},
+        {"text": "No", "action": f"act_entry:{page_id}"},
+    ])
+
+
+def _handle_edt_del_confirm(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    if not page_id:
+        return _err_screen(sd, "Missing page_id")
+    result = _run_async(delete_entry(page_id=page_id))
+    if result.get("success"):
+        return _build_activity_log_screen(sd, sd.get("context", {}).get("current_date"))
+    return _err_screen(sd, f"Failed to delete: {result.get('error', 'unknown')}")
+
+
 # ── Action Routing ─────────────────────────────────────────────────────────────
 
 # Exact match routes: (target_state, handler_fn)
@@ -588,10 +706,14 @@ PREFIX_ROUTES: Dict[str, Any] = {
     "rel_quality:": _handle_rel_quality,
     "sys_bottleneck:": _handle_sys_bottleneck,
     "sys_actions:": _handle_sys_actions,
-    "edt_type:": _handle_entry_detail,
-    "edt_time:": _handle_entry_detail,
-    "edt_desc:": _handle_entry_detail,
-    "edt_del:": _handle_entry_detail,
+    "edt_type:": _handle_edt_type,
+    "edt_type_pick:": _handle_edt_type_pick,
+    "edt_time:": _handle_edt_time,
+    "edt_time_pick:": _handle_edt_time_pick,
+    "edt_desc:": _handle_edt_desc,
+    "edt_desc_enter:": _handle_edt_desc_enter,
+    "edt_del:": _handle_edt_del,
+    "edt_del_confirm": _handle_edt_del_confirm,
     "act_view:": _handle_activity_log,
     "act_gaps:": _handle_gaps,
     "menu:main": _handle_dashboard,
@@ -608,7 +730,17 @@ PREFIX_ROUTES: Dict[str, Any] = {
 }
 
 
-def _resolve_handler(action: str):
+# State-based routes for free-text input (no callback_data, use --input instead)
+STATE_ROUTES: Dict[str, Any] = {
+    "entering_amount": _handle_financial_amount,
+    "entering_desc": _handle_enter_desc,
+    "entering_diet_desc": _handle_diet_desc,
+    "entering_edit_time": _handle_edt_time_pick,
+    "entering_edit_desc": _handle_edt_desc_enter,
+}
+
+
+def _resolve_handler(action: str, state: str = ""):
     """Find the handler function for an action string (exact then prefix match)."""
     if action in ACTION_ROUTES:
         return ACTION_ROUTES[action][1]
@@ -619,6 +751,9 @@ def _resolve_handler(action: str):
     for key, (_, handler) in ACTION_ROUTES.items():
         if action == key:
             return handler
+    # Fall back to state-based routing for free-text input
+    if action in {"input", "text", "enter", ""} and state in STATE_ROUTES:
+        return STATE_ROUTES[state]
     return None
 
 
@@ -644,7 +779,7 @@ def start_session(
     screen = _handle_dashboard(sd, "start")
     sd["history"].append({"action": "start", "screen": sd["state"], "timestamp": datetime.now(TZ).isoformat()})
     _save_session(sd)
-    return output(screen, fmt=format)
+    print(output(screen, fmt=format))
 
 
 @app.command("send")
@@ -657,28 +792,30 @@ def send_action(
     """Send an action (callback_data) to the current session. Returns next screen."""
     sd = _load_session(session)
     if not sd:
-        return output({"text": f"Session '{session}' not found. Start a new session first.",
+        print(output({"text": f"Session '{session}' not found. Start a new session first.",
                         "buttons": [], "session": session, "state": "error",
-                        "timestamp": datetime.now(TZ).isoformat()}, fmt=format)
+                        "timestamp": datetime.now(TZ).isoformat()}, fmt=format))
+        return
 
-    handler = _resolve_handler(action)
+    handler = _resolve_handler(action, sd.get("state", ""))
     if handler is None:
-        return output({"text": f"Unknown action: '{action}'. No matching handler found.",
+        print(output({"text": f"Unknown action: '{action}'. No matching handler found.",
                         "buttons": [{"text": "Dashboard", "action": "dashboard"}],
                         "session": sd["id"], "state": sd.get("state", "error"),
-                        "timestamp": datetime.now(TZ).isoformat()}, fmt=format)
+                        "timestamp": datetime.now(TZ).isoformat()}, fmt=format))
+        return
 
     try:
         screen = handler(sd, action, input_text)
         sd["history"].append({"action": action, "screen": sd["state"], "timestamp": datetime.now(TZ).isoformat()})
         _save_session(sd)
-        return output(screen, fmt=format)
+        print(output(screen, fmt=format))
     except Exception as e:
         logger.error("Action handler error: %s", e, exc_info=True)
-        return output({"text": f"Error processing action '{action}': {e}",
+        print(output({"text": f"Error processing action '{action}': {e}",
                         "buttons": [{"text": "Dashboard", "action": "dashboard"}],
                         "session": sd["id"], "state": sd.get("state", "error"),
-                        "timestamp": datetime.now(TZ).isoformat()}, fmt=format)
+                        "timestamp": datetime.now(TZ).isoformat()}, fmt=format))
 
 
 @app.command("status")
@@ -689,9 +826,10 @@ def session_status(
     """Show current session state and history."""
     sd = _load_session(session)
     if not sd:
-        return output({"text": f"Session '{session}' not found.", "buttons": [],
+        print(output({"text": f"Session '{session}' not found.", "buttons": [],
                         "session": session, "state": "error",
-                        "timestamp": datetime.now(TZ).isoformat()}, fmt=format)
+                        "timestamp": datetime.now(TZ).isoformat()}, fmt=format))
+        return
 
     lines = [
         f"Session: {sd['id']}",
@@ -704,7 +842,7 @@ def session_status(
         lines.append(f"  {h['timestamp']}  {h['action']}  ->  {h['screen']}")
     screen = {"text": "\n".join(lines), "buttons": [{"text": "Resume", "action": sd["state"]}],
               "session": sd["id"], "state": sd["state"], "timestamp": datetime.now(TZ).isoformat()}
-    return output(screen, fmt=format)
+    print(output(screen, fmt=format))
 
 
 @app.command("reset")
@@ -715,7 +853,8 @@ def reset_session(
     path = _session_path(session)
     if os.path.exists(path):
         os.remove(path)
-        return {"text": f"Session '{session}' reset.", "session": session, "state": "reset",
-                "timestamp": datetime.now(TZ).isoformat()}
-    return {"text": f"Session '{session}' not found.", "session": session, "state": "error",
-            "timestamp": datetime.now(TZ).isoformat()}
+        print(json.dumps({"text": f"Session '{session}' reset.", "session": session, "state": "reset",
+                "timestamp": datetime.now(TZ).isoformat()}))
+    else:
+        print(json.dumps({"text": f"Session '{session}' not found.", "session": session, "state": "error",
+                "timestamp": datetime.now(TZ).isoformat()}))

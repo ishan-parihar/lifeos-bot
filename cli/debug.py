@@ -61,8 +61,8 @@ def notion_consistency(
     appears in the result set.  Reports timing, staleness, and whether
     the page has been indexed yet.
     """
-    window_start = (datetime.now(TZ) - timedelta(minutes=minutes_ago)).isoformat()
-    window_end = (datetime.now(TZ) + timedelta(minutes=1)).isoformat()
+    window_start = (datetime.now(TZ) - timedelta(minutes=minutes_ago)).date().isoformat()
+    window_end = (datetime.now(TZ) + timedelta(minutes=1)).date().isoformat()
 
     t0 = time.monotonic()
     try:
@@ -261,19 +261,31 @@ def service_health(format: str = typer.Option("toon", help="Output format: toon,
     Reports name, status (ok / error), response time in seconds,
     and the error message when a check fails.
     """
-    checks = [
-        ("Activity", _check_activity),
-        ("Financial", _check_financial),
-        ("Diet", _check_diet),
-        ("Journal", _check_journal),
-        ("Dashboard", _check_dashboard),
-    ]
 
-    results = []
-    for name, check_fn in checks:
-        result = _run_check(name, check_fn)
-        results.append(result)
+    async def _run_all_checks():
+        """Run all health checks inside a single event loop to avoid
+        httpx/Notion client caching a closed event loop."""
+        checks = [
+            ("Activity", activity.get_activity_stats(hours=48)),
+            ("Financial", financial.get_financial_entries(limit=1)),
+            ("Diet", diet.get_diet_entries(limit=1)),
+            ("Journal", journal.get_subjective_entries(limit=1)),
+            ("Dashboard", dashboard.get_dashboard_data()),
+        ]
 
+        results = []
+        for name, coro in checks:
+            t0 = time.monotonic()
+            try:
+                result = await coro
+                elapsed = round(time.monotonic() - t0, 3)
+                results.append({"service": name, "status": "ok", "response_time": elapsed, "error": None, "data": result})
+            except Exception as exc:
+                elapsed = round(time.monotonic() - t0, 3)
+                results.append({"service": name, "status": "error", "response_time": elapsed, "error": str(exc), "data": None})
+        return results
+
+    results = _call_async(_run_all_checks())
     all_ok = all(r["status"] == "ok" for r in results)
     _emit(
         {
@@ -284,37 +296,6 @@ def service_health(format: str = typer.Option("toon", help="Output format: toon,
         },
         format,
     )
-
-
-def _run_check(name: str, check_fn) -> dict:
-    t0 = time.monotonic()
-    try:
-        result = check_fn()
-        elapsed = round(time.monotonic() - t0, 3)
-        return {"service": name, "status": "ok", "response_time": elapsed, "error": None, "data": result}
-    except Exception as exc:
-        elapsed = round(time.monotonic() - t0, 3)
-        return {"service": name, "status": "error", "response_time": elapsed, "error": str(exc), "data": None}
-
-
-def _check_activity():
-    return _call_async(activity.get_activity_stats(hours=48))
-
-
-def _check_financial():
-    return _call_async(financial.get_financial_entries(limit=1))
-
-
-def _check_diet():
-    return _call_async(diet.get_diet_entries(limit=1))
-
-
-def _check_journal():
-    return _call_async(journal.get_subjective_entries(limit=1))
-
-
-def _check_dashboard():
-    return _call_async(dashboard.get_dashboard_data())
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

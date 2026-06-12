@@ -31,7 +31,7 @@ app = typer.Typer(help="Direct commands (no session state)")
 
 
 def _now_iso() -> str:
-    return datetime.now(TZ).isoformat()
+    return datetime.now(TZ).date().isoformat()
 
 
 def _days_ago_iso(days: int) -> str:
