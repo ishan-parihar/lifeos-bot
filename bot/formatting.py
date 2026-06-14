@@ -155,6 +155,85 @@ def render_gap_report(gaps: List[dict]) -> str:
     return "\n".join(lines)
 
 
+# ── Enriched Gap Report ──────────────────────────────────────────────────────
+
+SEVERITY_EMOJI = {
+    "info": "ℹ️",
+    "low": "🟢",
+    "medium": "🟡",
+    "high": "🟠",
+    "critical": "🔴",
+}
+
+CLASSIFICATION_EMOJI = {
+    "likely_sleep": "😴",
+    "likely_mealtime": "🍽",
+    "likely_commute": "🚗",
+    "recurring_break": "🔄",
+    "untracked": "❓",
+    "unknown": "❓",
+    "boundary_gap": "📅",
+}
+
+
+def render_enriched_gap_report(gaps: list) -> str:
+    if not gaps:
+        return "✅ <b>No gaps detected</b> in the analyzed period."
+
+    severity_counts = {}
+    for gap in gaps:
+        sev = gap.severity
+        severity_counts[sev] = severity_counts.get(sev, 0) + 1
+
+    summary_parts = []
+    for sev in ["critical", "high", "medium", "low", "info"]:
+        count = severity_counts.get(sev, 0)
+        if count > 0:
+            emoji = SEVERITY_EMOJI.get(sev, "")
+            summary_parts.append(f"{emoji} {count} {sev}")
+
+    header = bold(f"📊 Gap Report — {len(gaps)} gap(s)") + "\n"
+    header += " | ".join(summary_parts) + "\n"
+    header += "─" * 30 + "\n"
+
+    lines = [header]
+    for i, gap in enumerate(gaps, 1):
+        sev_emoji = SEVERITY_EMOJI.get(gap.severity, "")
+        class_emoji = CLASSIFICATION_EMOJI.get(gap.classification, "")
+
+        start_str = gap.start.strftime("%b %d %H:%M")
+        end_str = gap.end.strftime("%b %d %H:%M")
+        hours_str = fmt_dur(gap.hours)
+
+        line = f"{i}. {sev_emoji} {class_emoji} <b>{gap.classification.replace('_', ' ').title()}</b>\n"
+        line += f"   <code>{start_str}</code> → <code>{end_str}</code> ({hours_str})\n"
+
+        if gap.diet_during:
+            meals = [d.get("meal_type", "?") for d in gap.diet_during]
+            line += f"   🍽 Meals: {', '.join(meals)}\n"
+
+        if gap.journal_day:
+            energy = gap.journal_day.get("energy_level")
+            focus = gap.journal_day.get("focus_level")
+            if energy or focus:
+                line += f"   📝 Journal: energy={energy}, focus={focus}\n"
+
+        lines.append(line)
+
+    lines.append("\n<b>Severity Breakdown:</b>\n")
+    for i, gap in enumerate(gaps, 1):
+        if gap.severity_reasons:
+            reasons = "; ".join(gap.severity_reasons[:2])
+            lines.append(f"{i}. {escape(reasons)}\n")
+
+    result = "".join(lines)
+
+    if len(result) > 4096:
+        result = result[:4090] + "\n\n<i>...truncated</i>"
+
+    return result
+
+
 # ── Telegram HTML escape ─────────────────────────────────────────────────────
 
 def escape(text: str) -> str:
