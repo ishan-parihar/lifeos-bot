@@ -1764,3 +1764,51 @@ async def check_activity_gaps(context: ContextTypes.DEFAULT_TYPE) -> None:
         await context.bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
 
     await bot_cache.set("last_gap_alert", True, expire=3600)
+
+
+# ── Enriched Gap Report ──────────────────────────────────────────────────────
+
+from services.gap_report import get_enriched_gaps
+from bot.formatting import render_enriched_gap_report
+
+
+async def gapreport_command(update, context) -> None:
+    """Handle the /gapreport command — show enriched gap report."""
+    window_end = datetime.now(timezone.utc)
+    window_start = window_end - timedelta(days=7)
+
+    if context.args:
+        try:
+            days = int(context.args[0])
+            window_start = window_end - timedelta(days=min(days, 30))
+        except (ValueError, IndexError):
+            pass
+
+    loading_msg = await update.message.reply_text(
+        "🔄 Analyzing gaps across all logs..."
+    )
+
+    try:
+        entries = await get_activity_entries(
+            date_from=window_start.strftime("%Y-%m-%d"),
+            date_to=window_end.strftime("%Y-%m-%d"),
+        ) or []
+
+        enriched_gaps = await get_enriched_gaps(
+            entries=entries,
+            window_start=window_start,
+            window_end=window_end,
+            diet_service=None,
+            journal_service=None,
+            insights_service=None,
+        )
+
+        report_text = render_enriched_gap_report(enriched_gaps)
+
+        await loading_msg.edit_text(report_text, parse_mode="HTML")
+
+    except Exception as e:
+        logger.error("Error generating gap report: %s", e)
+        await loading_msg.edit_text(
+            "❌ Error generating gap report. Please try again."
+        )
