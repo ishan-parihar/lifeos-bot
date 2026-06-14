@@ -70,6 +70,7 @@ from bot.handlers.activity import (
     delete_entry_confirm,
     show_gaps_callback,
     check_activity_gaps,
+    gapreport_command,
     # States
     CHOOSE_TYPE as ACT_TYPE,
     ENTER_DESC as ACT_DESC,
@@ -94,6 +95,7 @@ from bot.handlers.financial import (
     ENTER_AMOUNT as FIN_AMT,
     CHOOSE_CATEGORY as FIN_CAT,
     ENTER_NOTE as FIN_NOTE,
+    financial_edit_conv,
 )
 
 # ── Diet handler ──
@@ -109,6 +111,7 @@ from bot.handlers.diet import (
     ENTER_DESCRIPTION as DIET_DESC,
     ENTER_CALORIES as DIET_CAL,
     ENTER_NOTE as DIET_NOTE,
+    diet_edit_conv,
 )
 
 # ── Journal handlers ──
@@ -403,6 +406,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(show_gaps_callback, pattern="^act_gaps:"))
     application.add_handler(CallbackQueryHandler(back_to_activity, pattern="^act_back_dash$"))
     application.add_handler(CallbackQueryHandler(undo_action, pattern="^undo_action$"))
+    application.add_handler(CommandHandler("gapreport", gapreport_command))
 
     # Conversation handlers
     application.add_handler(build_activity_conversation())
@@ -414,6 +418,8 @@ def main() -> None:
     application.add_handler(build_subjective_conversation())
     application.add_handler(build_relational_conversation())
     application.add_handler(build_systemic_conversation())
+    application.add_handler(diet_edit_conv)
+    application.add_handler(financial_edit_conv)
 
     # Gap detection job
     job_queue = application.job_queue

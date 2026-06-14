@@ -1794,12 +1794,24 @@ async def gapreport_command(update, context) -> None:
             date_to=window_end.strftime("%Y-%m-%d"),
         ) or []
 
+        # Create service adapters for get_enriched_gaps
+        from services.diet import get_diet_entries as _get_diet
+        from services.journal import get_subjective_entries as _get_subjective
+
+        class _DietAdapter:
+            async def get_diet_entries(self, date_from, date_to):
+                return await _get_diet(date_from, date_to)
+
+        class _JournalAdapter:
+            async def get_entries(self, date_from, date_to):
+                return await _get_subjective(date_from, date_to)
+
         enriched_gaps = await get_enriched_gaps(
             entries=entries,
             window_start=window_start,
             window_end=window_end,
-            diet_service=None,
-            journal_service=None,
+            diet_service=_DietAdapter(),
+            journal_service=_JournalAdapter(),
             insights_service=None,
         )
 
