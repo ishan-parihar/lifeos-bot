@@ -1,7 +1,7 @@
 <!-- T2I HERO SPEC — Subject: a Telegram chat bubble weaving into a Notion database — messages flowing through a small bot node into structured pages. Composition: left chat column, center bot chip, right Notion board. Palette: Telegram sky #229ed9, Notion charcoal #1a1a1a, emerald #10b981 sync path. Style: friendly flat vector, soft glows, no text. 16:9. -->
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
-![LOC](https://img.shields.io/badge/LOC-11.6K-informational?style=flat-square)
+![LOC](https://img.shields.io/badge/LOC-11.9K-informational?style=flat-square)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot-0088cc?logo=telegram)
 ![Notion](https://img.shields.io/badge/Notion-API-000000?logo=notion)
 ![MCP](https://img.shields.io/badge/MCP-CLI-orange?logo=modelcontextprotocol)
