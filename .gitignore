@@ -17,3 +17,4 @@ __pycache__/
 .sisyphus/
 .oh-my-opencode/
 .history/
+.oh-my-opencode-pi-stats.json
