@@ -199,11 +199,12 @@ def _activity_delete(page_id: str | None, dry_run: bool, format: str) -> None:
 
 @app.command("financial")
 def financial_cmd(
-    action: str = typer.Option(..., help="log, view, summary, categories"),
+    action: str = typer.Option(..., help="log, view, summary, categories, detail, edit, delete"),
     type: str = typer.Option(None, help="Expense or Income"),
     amount: float = typer.Option(None, help="Transaction amount"),
     category: str = typer.Option(None, help="Category name"),
     notes: str = typer.Option(None, help="Optional notes"),
+    page_id: str = typer.Option(None, help="Page ID (for detail/edit/delete)"),
     days: int = typer.Option(30, help="Look-back window in days"),
     format: str = typer.Option("toon", help="Output format: toon, rich, text"),
     dry_run: bool = typer.Option(False, help="Preview without saving"),
@@ -216,6 +217,9 @@ def financial_cmd(
         view       – Show recent transactions.
         summary    – Aggregated totals over the date range.
         categories – List available category options.
+        detail     – Show entry details (requires --page-id).
+        edit       – Interactively edit an entry (requires --page-id).
+        delete     – Archive an entry (requires --page-id).
     """
     try:
         if action == "log":
@@ -226,11 +230,17 @@ def financial_cmd(
             _financial_summary(days, format)
         elif action == "categories":
             _financial_categories(format)
+        elif action == "detail":
+            _financial_detail(page_id)
+        elif action == "edit":
+            _financial_edit(page_id)
+        elif action == "delete":
+            _financial_delete(page_id)
         else:
             _emit(
                 {
                     "error": f"Unknown action: {action}",
-                    "valid": ["log", "view", "summary", "categories"],
+                    "valid": ["log", "view", "summary", "categories", "detail", "edit", "delete"],
                 },
                 format,
             )
@@ -305,6 +315,104 @@ def _financial_categories(format: str) -> None:
     _emit({"categories": cats, "count": len(cats)}, format)
 
 
+def _financial_detail(page_id: str) -> None:
+    """Display financial entry details."""
+    result = _call_async(financial.get_entry_detail(page_id))
+    if not result.get("found"):
+        print(f"Entry not found: {result.get('error', 'unknown')}")
+        return
+    entry = result["entry"]
+    print(f"💰 Type: {entry.get('type', 'N/A')}")
+    print(f"📅 Date: {entry.get('date', 'N/A')}")
+    print()
+    print(f"📂 Category: {entry.get('category', 'N/A')}")
+    print(f"💵 Amount: ${entry.get('amount', 0):.2f}")
+    print()
+    print(f"📝 Notes: {entry.get('notes', '')}")
+    print(f"Page ID: {entry.get('page_id', '')}")
+
+
+def _financial_edit(page_id: str) -> None:
+    """Interactively edit a financial entry."""
+    result = _call_async(financial.get_entry_detail(page_id))
+    if not result.get("found"):
+        print(f"Entry not found: {result.get('error', 'unknown')}")
+        return
+    entry = result["entry"]
+
+    print("Current entry:")
+    print(f"  1. Type: {entry.get('type', 'N/A')}")
+    print(f"  2. Amount: ${entry.get('amount', 0):.2f}")
+    print(f"  3. Category: {entry.get('category', 'N/A')}")
+    print(f"  4. Date: {entry.get('date', 'N/A')}")
+    print(f"  5. Notes: {entry.get('notes', '')}")
+    print(f"  6. Cancel")
+
+    choice = input("Choose field to edit (1-6): ").strip()
+
+    if choice == "1":
+        new_val = input("Enter new type (Expense/Income): ").strip()
+        if new_val:
+            result = _call_async(financial.update_entry_type(page_id, new_val))
+            if result.get("success"):
+                print(f"✅ Type updated: {result.get('old_type')} → {result.get('new_type')}")
+            else:
+                print(f"❌ Failed: {result.get('error', 'unknown')}")
+    elif choice == "2":
+        new_val = input("Enter new amount: ").strip()
+        if new_val:
+            try:
+                new_amount = float(new_val.replace("$", ""))
+                result = _call_async(financial.update_entry_amount(page_id, new_amount))
+                if result.get("success"):
+                    print(f"✅ Amount updated: ${result.get('old_amount', 0):.2f} → ${result.get('new_amount', 0):.2f}")
+                else:
+                    print(f"❌ Failed: {result.get('error', 'unknown')}")
+            except ValueError:
+                print("❌ Invalid amount.")
+    elif choice == "3":
+        new_val = input("Enter new category: ").strip()
+        if new_val:
+            result = _call_async(financial.update_entry_category(page_id, new_val))
+            if result.get("success"):
+                print(f"✅ Category updated: {result.get('old_category')} → {result.get('new_category')}")
+            else:
+                print(f"❌ Failed: {result.get('error', 'unknown')}")
+    elif choice == "4":
+        new_val = input("Enter new date (YYYY-MM-DD): ").strip()
+        if new_val:
+            result = _call_async(financial.update_entry_date(page_id, new_val))
+            if result.get("success"):
+                print(f"✅ Date updated: {result.get('old_date')} → {result.get('new_date')}")
+            else:
+                print(f"❌ Failed: {result.get('error', 'unknown')}")
+    elif choice == "5":
+        new_val = input("Enter new notes: ").strip()
+        if new_val:
+            result = _call_async(financial.update_entry_notes(page_id, new_val))
+            if result.get("success"):
+                print(f"✅ Notes updated: {result.get('old_notes')} → {result.get('new_notes')}")
+            else:
+                print(f"❌ Failed: {result.get('error', 'unknown')}")
+    elif choice == "6":
+        print("Cancelled.")
+    else:
+        print("Invalid choice.")
+
+
+def _financial_delete(page_id: str) -> None:
+    """Delete a financial entry with confirmation."""
+    confirm = input(f"Are you sure you want to delete entry {page_id}? (y/N): ").strip().lower()
+    if confirm != "y":
+        print("Cancelled.")
+        return
+    result = _call_async(financial.delete_entry(page_id))
+    if result.get("success"):
+        print(f"✅ Entry {page_id} deleted.")
+    else:
+        print(f"❌ Failed to delete: {result.get('error', 'unknown')}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. Diet
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -312,10 +420,11 @@ def _financial_categories(format: str) -> None:
 
 @app.command("diet")
 def diet_cmd(
-    action: str = typer.Option(..., help="log, view, meals"),
+    action: str = typer.Option(..., help="log, view, meals, detail, edit, delete"),
     meal_type: str = typer.Option(None, help="Breakfast, Lunch, Dinner, Snack"),
     description: str = typer.Option(None, help="What was eaten"),
     calories: int = typer.Option(None, help="Calorie count"),
+    page_id: str = typer.Option(None, help="Page ID (for detail/edit/delete)"),
     days: int = typer.Option(7, help="Look-back window in days"),
     format: str = typer.Option("toon", help="Output format: toon, rich, text"),
     dry_run: bool = typer.Option(False, help="Preview without saving"),
@@ -324,9 +433,12 @@ def diet_cmd(
     Diet log operations.
 
     Actions:
-        log   – Save a diet entry (requires --meal-type, --description).
-        view  – Show recent meals.
-        meals – List available meal types.
+        log    – Save a diet entry (requires --meal-type, --description).
+        view   – Show recent meals.
+        meals  – List available meal types.
+        detail – Show entry details (requires --page-id).
+        edit   – Interactively edit an entry (requires --page-id).
+        delete – Archive an entry (requires --page-id).
     """
     try:
         if action == "log":
@@ -335,9 +447,15 @@ def diet_cmd(
             _diet_view(days, format)
         elif action == "meals":
             _diet_meals(format)
+        elif action == "detail":
+            _diet_detail(page_id)
+        elif action == "edit":
+            _diet_edit(page_id)
+        elif action == "delete":
+            _diet_delete(page_id)
         else:
             _emit(
-                {"error": f"Unknown action: {action}", "valid": ["log", "view", "meals"]},
+                {"error": f"Unknown action: {action}", "valid": ["log", "view", "meals", "detail", "edit", "delete"]},
                 format,
             )
     except Exception as exc:
@@ -398,6 +516,94 @@ def _diet_view(days: int, format: str) -> None:
 def _diet_meals(format: str) -> None:
     meals = _call_async(diet.get_meal_types())
     _emit({"meal_types": meals, "count": len(meals)}, format)
+
+
+def _diet_detail(page_id: str) -> None:
+    """Display diet entry details."""
+    result = _call_async(diet.get_entry_detail(page_id))
+    if not result.get("found"):
+        print(f"Entry not found: {result.get('error', 'unknown')}")
+        return
+    entry = result["entry"]
+    print(f"🍽️ Meal Type: {entry.get('meal_type', 'N/A')}")
+    print(f"📅 Date: {entry.get('date', 'N/A')}")
+    print()
+    print(f"📝 Description: {entry.get('description', 'N/A')}")
+    print(f"🔢 Calories: {entry.get('calories', 'N/A')}")
+    print()
+    print(f"📝 Notes: {entry.get('notes', '')}")
+    print(f"Page ID: {entry.get('page_id', '')}")
+
+
+def _diet_edit(page_id: str) -> None:
+    """Interactively edit a diet entry."""
+    result = _call_async(diet.get_entry_detail(page_id))
+    if not result.get("found"):
+        print(f"Entry not found: {result.get('error', 'unknown')}")
+        return
+    entry = result["entry"]
+
+    print("Current entry:")
+    print(f"  1. Meal Type: {entry.get('meal_type', 'N/A')}")
+    print(f"  2. Description: {entry.get('description', 'N/A')}")
+    print(f"  3. Calories: {entry.get('calories', 'N/A')}")
+    print(f"  4. Date: {entry.get('date', 'N/A')}")
+    print(f"  5. Cancel")
+
+    choice = input("Choose field to edit (1-5): ").strip()
+
+    if choice == "1":
+        new_val = input("Enter new meal type: ").strip()
+        if new_val:
+            result = _call_async(diet.update_entry_meal_type(page_id, new_val))
+            if result.get("success"):
+                print(f"✅ Meal type updated: {result.get('old_type')} → {result.get('new_type')}")
+            else:
+                print(f"❌ Failed: {result.get('error', 'unknown')}")
+    elif choice == "2":
+        new_val = input("Enter new description: ").strip()
+        if new_val:
+            result = _call_async(diet.update_entry_description(page_id, new_val))
+            if result.get("success"):
+                print(f"✅ Description updated: {result.get('old_desc')} → {result.get('new_desc')}")
+            else:
+                print(f"❌ Failed: {result.get('error', 'unknown')}")
+    elif choice == "3":
+        new_val = input("Enter new calories: ").strip()
+        if new_val:
+            try:
+                result = _call_async(diet.update_entry_calories(page_id, int(new_val)))
+                if result.get("success"):
+                    print(f"✅ Calories updated: {result.get('old_calories')} → {result.get('new_calories')}")
+                else:
+                    print(f"❌ Failed: {result.get('error', 'unknown')}")
+            except ValueError:
+                print("❌ Invalid calorie value.")
+    elif choice == "4":
+        new_val = input("Enter new date (YYYY-MM-DD): ").strip()
+        if new_val:
+            result = _call_async(diet.update_entry_date(page_id, new_val))
+            if result.get("success"):
+                print(f"✅ Date updated: {result.get('old_date')} → {result.get('new_date')}")
+            else:
+                print(f"❌ Failed: {result.get('error', 'unknown')}")
+    elif choice == "5":
+        print("Cancelled.")
+    else:
+        print("Invalid choice.")
+
+
+def _diet_delete(page_id: str) -> None:
+    """Delete a diet entry with confirmation."""
+    confirm = input(f"Are you sure you want to delete entry {page_id}? (y/N): ").strip().lower()
+    if confirm != "y":
+        print("Cancelled.")
+        return
+    result = _call_async(diet.delete_entry(page_id))
+    if result.get("success"):
+        print(f"✅ Entry {page_id} deleted.")
+    else:
+        print(f"❌ Failed to delete: {result.get('error', 'unknown')}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

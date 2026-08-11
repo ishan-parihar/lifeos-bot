@@ -34,9 +34,20 @@ from services.activity import (
     update_entry_type, update_entry_time, delete_entry, calculate_offset,
 )
 from services.dashboard import get_dashboard_data
-from services.diet import get_diet_entries, get_meal_types, save_diet_entry
+from services.diet import (
+    get_diet_entries, get_meal_types, save_diet_entry,
+    get_entry_detail as get_diet_entry_detail,
+    delete_entry as delete_diet_entry,
+    update_entry_meal_type, update_entry_description,
+    update_entry_calories, update_entry_date as update_diet_date,
+)
 from services.financial import (
     get_financial_entries, get_financial_categories, save_financial_entry,
+    get_entry_detail as get_fin_entry_detail,
+    delete_entry as delete_fin_entry,
+    update_entry_type as update_fin_type,
+    update_entry_amount, update_entry_category,
+    update_entry_date as update_fin_date, update_entry_notes,
 )
 from services.journal import (
     get_subjective_entries, get_relational_entries, get_systemic_entries,
@@ -293,6 +304,61 @@ def _build_meal_picker_screen(sd: dict) -> dict:
     return _make_screen(sd, "Select meal type:", [
         {"text": m, "action": f"pick_meal:{m}"} for m in meals
     ] + [{"text": "Cancel", "action": "dashboard"}])
+
+
+def _build_diet_detail_screen(sd: dict, page_id: str) -> dict:
+    """Show diet entry detail with edit/delete buttons."""
+    detail = _run_async(get_diet_entry_detail(page_id))
+    if not detail.get("found"):
+        return _err_screen(sd, f"Entry not found: {detail.get('error', 'unknown')}")
+    entry = detail["entry"]
+    lines = [
+        "Diet Entry Detail",
+        f"  Meal Type: {entry.get('meal_type', 'N/A')}",
+        f"  Date: {entry.get('date', 'N/A')}",
+        f"  Description: {entry.get('description', 'N/A')}",
+        f"  Calories: {entry.get('calories', 'N/A')}",
+    ]
+    if entry.get("notes"):
+        lines.append(f"  Notes: {entry.get('notes', '')}")
+    sd["context"]["selected_entry"] = page_id
+    sd["state"] = "viewing_diet_detail"
+    return _make_screen(sd, "\n".join(lines), [
+        {"text": "Edit Meal Type", "action": f"edt_diet_type:{page_id}"},
+        {"text": "Edit Description", "action": f"edt_diet_desc:{page_id}"},
+        {"text": "Edit Calories", "action": f"edt_diet_cal:{page_id}"},
+        {"text": "Edit Date", "action": f"edt_diet_date:{page_id}"},
+        {"text": "Delete", "action": f"edt_diet_del:{page_id}"},
+        {"text": "Back", "action": "diet_log"},
+    ])
+
+
+def _build_financial_detail_screen(sd: dict, page_id: str) -> dict:
+    """Show financial entry detail with edit/delete buttons."""
+    detail = _run_async(get_fin_entry_detail(page_id))
+    if not detail.get("found"):
+        return _err_screen(sd, f"Entry not found: {detail.get('error', 'unknown')}")
+    entry = detail["entry"]
+    lines = [
+        "Financial Entry Detail",
+        f"  Type: {entry.get('type', 'N/A')}",
+        f"  Date: {entry.get('date', 'N/A')}",
+        f"  Category: {entry.get('category', 'N/A')}",
+        f"  Amount: ${entry.get('amount', 0):.2f}",
+    ]
+    if entry.get("notes"):
+        lines.append(f"  Notes: {entry.get('notes', '')}")
+    sd["context"]["selected_entry"] = page_id
+    sd["state"] = "viewing_financial_detail"
+    return _make_screen(sd, "\n".join(lines), [
+        {"text": "Edit Type", "action": f"edt_fin_type:{page_id}"},
+        {"text": "Edit Amount", "action": f"edt_fin_amount:{page_id}"},
+        {"text": "Edit Category", "action": f"edt_fin_cat:{page_id}"},
+        {"text": "Edit Date", "action": f"edt_fin_date:{page_id}"},
+        {"text": "Edit Notes", "action": f"edt_fin_notes:{page_id}"},
+        {"text": "Delete", "action": f"edt_fin_del:{page_id}"},
+        {"text": "Back", "action": "financial_log"},
+    ])
 
 
 def _build_journal_menu_screen(sd: dict) -> dict:
@@ -665,6 +731,276 @@ def _handle_edt_del_confirm(sd, action, input_text=None):
     return _err_screen(sd, f"Failed to delete: {result.get('error', 'unknown')}")
 
 
+# ── Diet Edit / Delete Handlers ────────────────────────────────────────────────
+
+
+def _handle_diet_entry_detail(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    return _build_diet_detail_screen(sd, parts[1] if len(parts) > 1 else "")
+
+
+def _handle_edt_diet_type(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    meals = _run_async(get_meal_types())
+    sd["state"] = "picking_edit_diet_type"
+    return _make_screen(sd, "Select new meal type:", [
+        {"text": m, "action": f"edt_diet_type_pick:{page_id}:{m}"} for m in meals
+    ] + [{"text": "Cancel", "action": f"diet_entry:{page_id}"}])
+
+
+def _handle_edt_diet_type_pick(sd, action, input_text=None):
+    parts = action.split(":", 2)
+    page_id = parts[1] if len(parts) > 1 else ""
+    new_type = parts[2] if len(parts) > 2 else ""
+    if not page_id or not new_type:
+        return _err_screen(sd, "Missing page_id or meal type")
+    result = _run_async(update_entry_meal_type(page_id=page_id, new_type=new_type))
+    if result.get("success"):
+        return _build_diet_detail_screen(sd, page_id)
+    return _err_screen(sd, f"Failed to update meal type: {result.get('error', 'unknown')}")
+
+
+def _handle_edt_diet_desc(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    sd["state"] = "entering_diet_edit_desc"
+    return _make_screen(sd, "Enter new description:", [
+        {"text": "Cancel", "action": f"diet_entry:{page_id}"},
+    ])
+
+
+def _handle_edt_diet_desc_enter(sd, action, input_text=None):
+    parts = action.split(":", 2)
+    page_id = parts[1] if len(parts) > 1 else ""
+    new_desc = parts[2] if len(parts) > 2 else (input_text or "")
+    if not page_id:
+        return _err_screen(sd, "Missing page_id")
+    result = _run_async(update_entry_description(page_id=page_id, new_desc=new_desc))
+    if result.get("success"):
+        return _build_diet_detail_screen(sd, page_id)
+    return _err_screen(sd, f"Failed to update description: {result.get('error', 'unknown')}")
+
+
+def _handle_edt_diet_cal(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    sd["state"] = "entering_diet_edit_cal"
+    return _make_screen(sd, "Enter new calorie count:", [
+        {"text": "Cancel", "action": f"diet_entry:{page_id}"},
+    ])
+
+
+def _handle_edt_diet_cal_enter(sd, action, input_text=None):
+    parts = action.split(":", 2)
+    page_id = parts[1] if len(parts) > 1 else ""
+    cal_str = parts[2] if len(parts) > 2 else (input_text or "")
+    if not page_id:
+        return _err_screen(sd, "Missing page_id")
+    try:
+        new_cal = int(cal_str)
+    except ValueError:
+        return _err_screen(sd, "Invalid calorie count")
+    result = _run_async(update_entry_calories(page_id=page_id, new_calories=new_cal))
+    if result.get("success"):
+        return _build_diet_detail_screen(sd, page_id)
+    return _err_screen(sd, f"Failed to update calories: {result.get('error', 'unknown')}")
+
+
+def _handle_edt_diet_date(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    sd["state"] = "entering_diet_edit_date"
+    return _make_screen(sd, "Enter new date (YYYY-MM-DD):", [
+        {"text": "Cancel", "action": f"diet_entry:{page_id}"},
+    ])
+
+
+def _handle_edt_diet_date_enter(sd, action, input_text=None):
+    parts = action.split(":", 2)
+    page_id = parts[1] if len(parts) > 1 else ""
+    new_date = parts[2] if len(parts) > 2 else (input_text or "")
+    if not page_id:
+        return _err_screen(sd, "Missing page_id")
+    result = _run_async(update_diet_date(page_id=page_id, new_date=new_date))
+    if result.get("success"):
+        return _build_diet_detail_screen(sd, page_id)
+    return _err_screen(sd, f"Failed to update date: {result.get('error', 'unknown')}")
+
+
+def _handle_edt_diet_del(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    sd["state"] = "confirming_diet_delete"
+    return _make_screen(sd, "Delete this diet entry? This cannot be undone.", [
+        {"text": "Yes, Delete", "action": f"edt_diet_del_confirm:{page_id}"},
+        {"text": "No", "action": f"diet_entry:{page_id}"},
+    ])
+
+
+def _handle_edt_diet_del_confirm(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    if not page_id:
+        return _err_screen(sd, "Missing page_id")
+    result = _run_async(delete_diet_entry(page_id=page_id))
+    if result.get("success"):
+        return _build_diet_log_screen(sd)
+    return _err_screen(sd, f"Failed to delete: {result.get('error', 'unknown')}")
+
+
+# ── Financial Edit / Delete Handlers ───────────────────────────────────────────
+
+
+def _handle_fin_entry_detail(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    return _build_financial_detail_screen(sd, parts[1] if len(parts) > 1 else "")
+
+
+def _handle_edt_fin_type(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    sd["state"] = "picking_edit_fin_type"
+    return _make_screen(sd, "Select new type (Expense/Income):", [
+        {"text": "Expense", "action": f"edt_fin_type_pick:{page_id}:Expense"},
+        {"text": "Income", "action": f"edt_fin_type_pick:{page_id}:Income"},
+        {"text": "Cancel", "action": f"fin_entry:{page_id}"},
+    ])
+
+
+def _handle_edt_fin_type_pick(sd, action, input_text=None):
+    parts = action.split(":", 2)
+    page_id = parts[1] if len(parts) > 1 else ""
+    new_type = parts[2] if len(parts) > 2 else ""
+    if not page_id or not new_type:
+        return _err_screen(sd, "Missing page_id or type")
+    result = _run_async(update_fin_type(page_id=page_id, new_type=new_type))
+    if result.get("success"):
+        return _build_financial_detail_screen(sd, page_id)
+    return _err_screen(sd, f"Failed to update type: {result.get('error', 'unknown')}")
+
+
+def _handle_edt_fin_amount(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    sd["state"] = "entering_fin_edit_amount"
+    return _make_screen(sd, "Enter new amount:", [
+        {"text": "Cancel", "action": f"fin_entry:{page_id}"},
+    ])
+
+
+def _handle_edt_fin_amount_enter(sd, action, input_text=None):
+    parts = action.split(":", 2)
+    page_id = parts[1] if len(parts) > 1 else ""
+    amt_str = parts[2] if len(parts) > 2 else (input_text or "")
+    if not page_id:
+        return _err_screen(sd, "Missing page_id")
+    try:
+        new_amount = float(amt_str.replace("$", ""))
+    except ValueError:
+        return _err_screen(sd, "Invalid amount")
+    result = _run_async(update_entry_amount(page_id=page_id, new_amount=new_amount))
+    if result.get("success"):
+        return _build_financial_detail_screen(sd, page_id)
+    return _err_screen(sd, f"Failed to update amount: {result.get('error', 'unknown')}")
+
+
+def _handle_edt_fin_cat(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    cats = _run_async(get_financial_categories())
+    sd["state"] = "picking_edit_fin_cat"
+    return _make_screen(sd, "Select new category:", [
+        {"text": c, "action": f"edt_fin_cat_pick:{page_id}:{c}"} for c in cats
+    ] + [{"text": "Cancel", "action": f"fin_entry:{page_id}"}])
+
+
+def _handle_edt_fin_cat_pick(sd, action, input_text=None):
+    parts = action.split(":", 2)
+    page_id = parts[1] if len(parts) > 1 else ""
+    new_cat = parts[2] if len(parts) > 2 else ""
+    if not page_id or not new_cat:
+        return _err_screen(sd, "Missing page_id or category")
+    result = _run_async(update_entry_category(page_id=page_id, new_category=new_cat))
+    if result.get("success"):
+        return _build_financial_detail_screen(sd, page_id)
+    return _err_screen(sd, f"Failed to update category: {result.get('error', 'unknown')}")
+
+
+def _handle_edt_fin_date(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    sd["state"] = "entering_fin_edit_date"
+    return _make_screen(sd, "Enter new date (YYYY-MM-DD):", [
+        {"text": "Cancel", "action": f"fin_entry:{page_id}"},
+    ])
+
+
+def _handle_edt_fin_date_enter(sd, action, input_text=None):
+    parts = action.split(":", 2)
+    page_id = parts[1] if len(parts) > 1 else ""
+    new_date = parts[2] if len(parts) > 2 else (input_text or "")
+    if not page_id:
+        return _err_screen(sd, "Missing page_id")
+    result = _run_async(update_fin_date(page_id=page_id, new_date=new_date))
+    if result.get("success"):
+        return _build_financial_detail_screen(sd, page_id)
+    return _err_screen(sd, f"Failed to update date: {result.get('error', 'unknown')}")
+
+
+def _handle_edt_fin_notes(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    sd["state"] = "entering_fin_edit_notes"
+    return _make_screen(sd, "Enter new notes:", [
+        {"text": "Cancel", "action": f"fin_entry:{page_id}"},
+    ])
+
+
+def _handle_edt_fin_notes_enter(sd, action, input_text=None):
+    parts = action.split(":", 2)
+    page_id = parts[1] if len(parts) > 1 else ""
+    new_notes = parts[2] if len(parts) > 2 else (input_text or "")
+    if not page_id:
+        return _err_screen(sd, "Missing page_id")
+    result = _run_async(update_entry_notes(page_id=page_id, new_notes=new_notes))
+    if result.get("success"):
+        return _build_financial_detail_screen(sd, page_id)
+    return _err_screen(sd, f"Failed to update notes: {result.get('error', 'unknown')}")
+
+
+def _handle_edt_fin_del(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    sd["context"].setdefault("pending_data", {})["edit_page_id"] = page_id
+    sd["state"] = "confirming_fin_delete"
+    return _make_screen(sd, "Delete this financial entry? This cannot be undone.", [
+        {"text": "Yes, Delete", "action": f"edt_fin_del_confirm:{page_id}"},
+        {"text": "No", "action": f"fin_entry:{page_id}"},
+    ])
+
+
+def _handle_edt_fin_del_confirm(sd, action, input_text=None):
+    parts = action.split(":", 1)
+    page_id = parts[1] if len(parts) > 1 else ""
+    if not page_id:
+        return _err_screen(sd, "Missing page_id")
+    result = _run_async(delete_fin_entry(page_id=page_id))
+    if result.get("success"):
+        return _build_financial_log_screen(sd)
+    return _err_screen(sd, f"Failed to delete: {result.get('error', 'unknown')}")
+
+
 # ── Action Routing ─────────────────────────────────────────────────────────────
 
 # Exact match routes: (target_state, handler_fn)
@@ -713,7 +1049,31 @@ PREFIX_ROUTES: Dict[str, Any] = {
     "edt_desc:": _handle_edt_desc,
     "edt_desc_enter:": _handle_edt_desc_enter,
     "edt_del:": _handle_edt_del,
-    "edt_del_confirm": _handle_edt_del_confirm,
+    "edt_del_confirm:": _handle_edt_del_confirm,
+    "diet_entry:": _handle_diet_entry_detail,
+    "edt_diet_type:": _handle_edt_diet_type,
+    "edt_diet_type_pick:": _handle_edt_diet_type_pick,
+    "edt_diet_desc:": _handle_edt_diet_desc,
+    "edt_diet_desc_enter:": _handle_edt_diet_desc_enter,
+    "edt_diet_cal:": _handle_edt_diet_cal,
+    "edt_diet_cal_enter:": _handle_edt_diet_cal_enter,
+    "edt_diet_date:": _handle_edt_diet_date,
+    "edt_diet_date_enter:": _handle_edt_diet_date_enter,
+    "edt_diet_del:": _handle_edt_diet_del,
+    "edt_diet_del_confirm:": _handle_edt_diet_del_confirm,
+    "fin_entry:": _handle_fin_entry_detail,
+    "edt_fin_type:": _handle_edt_fin_type,
+    "edt_fin_type_pick:": _handle_edt_fin_type_pick,
+    "edt_fin_amount:": _handle_edt_fin_amount,
+    "edt_fin_amount_enter:": _handle_edt_fin_amount_enter,
+    "edt_fin_cat:": _handle_edt_fin_cat,
+    "edt_fin_cat_pick:": _handle_edt_fin_cat_pick,
+    "edt_fin_date:": _handle_edt_fin_date,
+    "edt_fin_date_enter:": _handle_edt_fin_date_enter,
+    "edt_fin_notes:": _handle_edt_fin_notes,
+    "edt_fin_notes_enter:": _handle_edt_fin_notes_enter,
+    "edt_fin_del:": _handle_edt_fin_del,
+    "edt_fin_del_confirm:": _handle_edt_fin_del_confirm,
     "act_view:": _handle_activity_log,
     "act_gaps:": _handle_gaps,
     "menu:main": _handle_dashboard,
@@ -737,6 +1097,13 @@ STATE_ROUTES: Dict[str, Any] = {
     "entering_diet_desc": _handle_diet_desc,
     "entering_edit_time": _handle_edt_time_pick,
     "entering_edit_desc": _handle_edt_desc_enter,
+    "entering_diet_edit_desc": _handle_edt_diet_desc_enter,
+    "entering_diet_edit_cal": _handle_edt_diet_cal_enter,
+    "entering_diet_edit_date": _handle_edt_diet_date_enter,
+    "entering_fin_edit_amount": _handle_edt_fin_amount_enter,
+    "entering_fin_edit_date": _handle_edt_fin_date_enter,
+    "entering_fin_edit_notes": _handle_edt_fin_notes_enter,
+    "entering_person": _handle_rel_person,
 }
 
 

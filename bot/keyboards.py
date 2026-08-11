@@ -281,3 +281,73 @@ def build_edit_time_offset_keyboard(page_id: str) -> InlineKeyboardMarkup:
 def build_back_button(callback: str = "menu:main") -> InlineKeyboardMarkup:
     """Single back button."""
     return InlineKeyboardMarkup([[InlineKeyboardButton(text="Back", callback_data=callback)]])
+
+
+def financial_entry_detail_keyboard(page_id: str) -> InlineKeyboardMarkup:
+    """Edit/delete options for a single financial entry."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="💰 Amount", callback_data=f"fin_edit_amount:{page_id[:36]}"),
+            InlineKeyboardButton(text="📂 Category", callback_data=f"fin_edit_category:{page_id[:36]}"),
+            InlineKeyboardButton(text="🏷️ Type", callback_data=f"fin_edit_type:{page_id[:36]}"),
+        ],
+        [
+            InlineKeyboardButton(text="📅 Date", callback_data=f"fin_edit_date:{page_id[:36]}"),
+            InlineKeyboardButton(text="📝 Notes", callback_data=f"fin_edit_notes:{page_id[:36]}"),
+            InlineKeyboardButton(text="🗑 Delete", callback_data=f"fin_delete:{page_id[:36]}"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Back", callback_data="fin_log"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def financial_edit_field_keyboard(page_id: str, field: str) -> InlineKeyboardMarkup:
+    """Field-specific edit keyboard for financial entries."""
+    if field == "type":
+        keyboard = [
+            [InlineKeyboardButton(text="💵 Income", callback_data=f"fin_set_type:{page_id[:36]}:Income")],
+            [InlineKeyboardButton(text="💸 Expense", callback_data=f"fin_set_type:{page_id[:36]}:Expense")],
+            [InlineKeyboardButton(text="💰 Savings", callback_data=f"fin_set_type:{page_id[:36]}:Savings")],
+            [InlineKeyboardButton(text="❌ Cancel", callback_data=f"fin_cancel_edit:{page_id[:36]}")],
+        ]
+    else:
+        keyboard = [
+            [InlineKeyboardButton(text="❌ Cancel", callback_data=f"fin_cancel_edit:{page_id[:36]}")],
+        ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def diet_entry_detail_keyboard(page_id: str) -> InlineKeyboardMarkup:
+    """Edit/delete options for a single diet entry."""
+    keyboard = [
+        [
+            InlineKeyboardButton(text="✏️ Meal Type", callback_data=f"diet_edit_type:{page_id}"),
+            InlineKeyboardButton(text="📝 Description", callback_data=f"diet_edit_desc:{page_id}"),
+            InlineKeyboardButton(text="🔢 Calories", callback_data=f"diet_edit_calories:{page_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="📅 Date", callback_data=f"diet_edit_date:{page_id}"),
+            InlineKeyboardButton(text="🗑 Delete", callback_data=f"diet_delete:{page_id}"),
+        ],
+        [
+            InlineKeyboardButton(text="🔙 Back", callback_data="diet_log"),
+        ],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def diet_edit_field_keyboard(page_id: str, field: str) -> InlineKeyboardMarkup:
+    """Field-specific edit keyboard for diet entries."""
+    keyboard: List[List[InlineKeyboardButton]] = []
+    if field == "meal_type":
+        meals = ["🍳 Breakfast", "🥗 Lunch", "🍽️ Dinner", "🍿 Snack"]
+        for meal in meals:
+            clean_name = meal.split(" ", 1)[1]
+            keyboard.append([InlineKeyboardButton(
+                text=meal,
+                callback_data=f"diet_set_type:{page_id}:{clean_name}",
+            )])
+    keyboard.append([InlineKeyboardButton(text="❌ Cancel", callback_data=f"diet_cancel_edit:{page_id}")])
+    return InlineKeyboardMarkup(keyboard)
