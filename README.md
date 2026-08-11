@@ -2,6 +2,7 @@
 
 ![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
 ![LOC](https://img.shields.io/badge/LOC-11.9K-informational?style=flat-square)
+[![CI](https://github.com/ishan-parihar/lifeos-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/ishan-parihar/lifeos-bot/actions/workflows/ci.yml)
 ![Telegram](https://img.shields.io/badge/Telegram-Bot-0088cc?logo=telegram)
 ![Notion](https://img.shields.io/badge/Notion-API-000000?logo=notion)
 ![MCP](https://img.shields.io/badge/MCP-CLI-orange?logo=modelcontextprotocol)
