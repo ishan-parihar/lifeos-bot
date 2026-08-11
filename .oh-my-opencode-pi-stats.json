@@ -1,0 +1,65 @@
+{
+  "updatedAt": 1781433881097,
+  "categories": {},
+  "agents": {},
+  "tools": {},
+  "adapters": {},
+  "failureKinds": {},
+  "background": {
+    "queued": 0,
+    "completed": 0,
+    "failed": 7,
+    "cancelled": 0
+  },
+  "recent": [
+    {
+      "kind": "background",
+      "label": "fixer:pantheon_o93dg234",
+      "status": "failed",
+      "ts": 1781433881096,
+      "failureKind": "background"
+    },
+    {
+      "kind": "background",
+      "label": "fixer:pantheon_r2oxlzcv",
+      "status": "failed",
+      "ts": 1781433881097,
+      "failureKind": "background"
+    },
+    {
+      "kind": "background",
+      "label": "explorer:pantheon_lymw7uuf",
+      "status": "failed",
+      "ts": 1781433881097,
+      "failureKind": "background"
+    },
+    {
+      "kind": "background",
+      "label": "explorer:pantheon_mehw6mlg",
+      "status": "failed",
+      "ts": 1781433881097,
+      "failureKind": "background"
+    },
+    {
+      "kind": "background",
+      "label": "explorer:pantheon_k81j8q0i",
+      "status": "failed",
+      "ts": 1781433881097,
+      "failureKind": "background"
+    },
+    {
+      "kind": "background",
+      "label": "explorer:pantheon_hzw9frya",
+      "status": "failed",
+      "ts": 1781433881097,
+      "failureKind": "background"
+    },
+    {
+      "kind": "background",
+      "label": "fixer:pantheon_lkg7qyjn",
+      "status": "failed",
+      "ts": 1781433881097,
+      "failureKind": "background"
+    }
+  ]
+}
