@@ -18,3 +18,4 @@ __pycache__/
 .oh-my-opencode/
 .history/
 .oh-my-opencode-pi-stats.json
+.pytest_cache/
