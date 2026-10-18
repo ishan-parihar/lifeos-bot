@@ -1,13 +1,7 @@
+# LifeOS Bot
 <!-- T2I HERO SPEC — Subject: a Telegram chat bubble weaving into a Notion database — messages flowing through a small bot node into structured pages. Composition: left chat column, center bot chip, right Notion board. Palette: Telegram sky #229ed9, Notion charcoal #1a1a1a, emerald #10b981 sync path. Style: friendly flat vector, soft glows, no text. 16:9. -->
 
-![Python](https://img.shields.io/badge/Python-3.11-blue?logo=python)
-![LOC](https://img.shields.io/badge/LOC-11.9K-informational?style=flat-square)
 [![CI](https://github.com/ishan-parihar/lifeos-bot/actions/workflows/ci.yml/badge.svg)](https://github.com/ishan-parihar/lifeos-bot/actions/workflows/ci.yml)
-![Telegram](https://img.shields.io/badge/Telegram-Bot-0088cc?logo=telegram)
-![Notion](https://img.shields.io/badge/Notion-API-000000?logo=notion)
-![MCP](https://img.shields.io/badge/MCP-CLI-orange?logo=modelcontextprotocol)
-![License](https://img.shields.io/badge/License-MIT-green)
-![Status](https://img.shields.io/badge/Status-Active-brightgreen)
 
 
 > **The LifeOS conversational interface** — a Telegram bot for logging and tracking daily life, backed by a Notion data layer, plus an agent-facing CLI for simulating and driving the same flows headlessly.
@@ -77,6 +71,12 @@ install.sh  one-shot environment bootstrap
 - **Simulation harness** — the full agent journey is replayable without a live Telegram session
 
 ## Setup
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ishan-parihar/lifeos-bot/master/install.sh | bash
+```
+
+Or run locally:
 
 ```bash
 ./install.sh          # bootstraps venv + deps
