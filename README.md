@@ -70,6 +70,8 @@ install.sh  one-shot environment bootstrap
 - **Cache-aware** — repeated queries hit diskcache rather than re-pinging Notion
 - **Simulation harness** — the full agent journey is replayable without a live Telegram session
 
+Every doc in `docs/` is listed with the question it answers in [docs/PAGE-INDEX.md](docs/PAGE-INDEX.md).
+
 ## Setup
 
 ```bash
