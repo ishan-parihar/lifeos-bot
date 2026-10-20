@@ -19,3 +19,8 @@ __pycache__/
 .history/
 .oh-my-opencode-pi-stats.json
 .pytest_cache/
+
+# genome runtime state (locks, temp files, recon tokens, read marks)
+*.genome-lock
+*.genome-tmp
+.genome/
